@@ -273,6 +273,11 @@ onUnmounted(() => {
 .runtime-log-list {
   display: grid;
   gap: 12px;
+  max-height: clamp(360px, 56vh, 640px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
 }
 
 .runtime-log-item,

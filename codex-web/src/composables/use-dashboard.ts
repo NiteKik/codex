@@ -252,6 +252,7 @@ export const useDashboard = () => {
   });
 
   return {
+    accounts,
     errorMessage,
     metricCards,
     logs,

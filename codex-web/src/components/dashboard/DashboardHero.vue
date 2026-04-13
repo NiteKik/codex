@@ -20,23 +20,23 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section class="dashboard-hero">
-    <div class="dashboard-hero__copy">
-      <span class="dashboard-kicker">Quota Gateway</span>
-      <h1>仪表盘</h1>
-      <div class="dashboard-status-card__value">
-        <span class="status-pill" :class="`status-pill--${statusTone}`">{{
-          statusLabel
-        }}</span>
-        <span class="dashboard-last-sync">{{ lastSyncLabel }}</span>
+  <section class="dashboard-hero dashboard-hero__copy">
+    <span class="dashboard-kicker">Quota Gateway</span>
+    <h1>仪表盘</h1>
+    <div class="dashboard-status-card__value">
+      <span class="status-pill" :class="`status-pill--${statusTone}`">{{
+        statusLabel
+      }}</span>
+      <span class="dashboard-last-sync">{{ lastSyncLabel }}</span>
+    </div>
+    <article class="dashboard-status-card">
+      <span class="dashboard-label">倒计时采集</span>
+      <div class="dashboard-status-card__meta">
+        <strong>{{ pollCountdownLabel }}</strong>
+        <span>{{ pollCountdownMeta }}</span>
       </div>
-      <article class="dashboard-status-card">
-        <span class="dashboard-label">倒计时采集</span>
-        <div class="dashboard-status-card__meta">
-          <strong>{{ pollCountdownLabel }}</strong>
-          <span>{{ pollCountdownMeta }}</span>
-        </div>
-      </article>
+    </article>
+    <div class="button-group">
       <button
         type="button"
         class="secondary-btn"
@@ -89,6 +89,8 @@ const emit = defineEmits<{
 
 .dashboard-hero__copy,
 .dashboard-hero__controls {
+  display: flex;
+  justify-content: space-between;
   position: relative;
   z-index: 1;
 }
@@ -258,6 +260,10 @@ const emit = defineEmits<{
 .status-pill--critical {
   background: var(--critical-soft);
   color: var(--critical);
+}
+
+.button-group {
+  display: flex;
 }
 
 .status-pill--idle {

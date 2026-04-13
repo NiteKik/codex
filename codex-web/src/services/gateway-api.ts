@@ -1,5 +1,7 @@
 export type AccountStatus = "healthy" | "exhausted" | "cooling" | "invalid";
 export type AuthMode = "bearer" | "static-headers";
+export type WorkspaceKind = "personal" | "team" | "unknown";
+export type SubscriptionStatus = "active" | "trial" | "inactive" | "unknown";
 
 export interface AuthConfig {
   mode: AuthMode;
@@ -8,15 +10,31 @@ export interface AuthConfig {
 }
 
 export interface AccountQuotaState {
+  weeklyUsed: number;
   weeklyRemaining: number;
   weeklyTotal: number;
   weeklyRemainingRatio: number;
   weeklyResetAt: string | null;
+  window5hUsed: number;
   window5hRemaining: number;
   window5hTotal: number;
   window5hRemainingRatio: number;
   window5hResetAt: string | null;
+  reservedUnits: number;
+  adjustedUnits: number;
   sampleTime: string | null;
+}
+
+export interface WorkspaceContext {
+  kind: WorkspaceKind;
+  id: string | null;
+  name: string | null;
+  headers: Record<string, string> | null;
+}
+
+export interface SubscriptionContext {
+  planType: string | null;
+  status: SubscriptionStatus;
 }
 
 export interface AccountRow {
@@ -27,6 +45,8 @@ export interface AccountRow {
   quotaPath: string;
   proxyPathPrefix: string;
   auth: AuthConfig;
+  workspace: WorkspaceContext;
+  subscription: SubscriptionContext;
   status: AccountStatus;
   quota: AccountQuotaState;
 }
@@ -40,6 +60,9 @@ export interface CreateAccountPayload {
   upstreamBaseUrl?: string;
   quotaPath?: string;
   proxyPathPrefix?: string;
+  workspace?: WorkspaceContext;
+  sessionInfo?: string | null;
+  session_info?: string | null;
 }
 
 export interface UpdateAccountPayload {
@@ -51,6 +74,7 @@ export interface UpdateAccountPayload {
   upstreamBaseUrl?: string;
   quotaPath?: string;
   proxyPathPrefix?: string;
+  workspace?: WorkspaceContext;
 }
 
 export interface ChatgptCaptureTask {
@@ -65,11 +89,63 @@ export interface ChatgptCaptureTask {
   result:
     | {
         email: string;
+        workspace: WorkspaceContext;
         hasUsagePayload: boolean;
         capturedAt: string;
         profileKey: string;
       }
     | null;
+}
+
+export type GatewayManagedTokenStatus = "active" | "expired" | "revoked";
+
+export interface GatewayManagedTokenItem {
+  id: string;
+  name: string;
+  tokenPreview: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  status: GatewayManagedTokenStatus;
+}
+
+export interface GatewayPrimaryTokenInfo {
+  token: string;
+  tokenPreview: string;
+  source: string;
+  tokenFilePath: string | null;
+}
+
+export interface GatewayTokenListPayload {
+  ok: boolean;
+  required: boolean;
+  primaryToken: GatewayPrimaryTokenInfo;
+  tokens: GatewayManagedTokenItem[];
+}
+
+export interface AccountUpgradeActivationResult {
+  productType: string;
+  cdkeyPreview: string;
+  checkMessage: string;
+  message: string;
+  remainingCdks: number;
+}
+
+export interface AccountUpgradeResponse {
+  ok: boolean;
+  account: AccountRow;
+  activation: AccountUpgradeActivationResult;
+}
+
+export interface CdkProductOption {
+  productType: string;
+  count: number;
+}
+
+export interface CdkOptionsResponse {
+  options: CdkProductOption[];
+  defaultProductType: string;
 }
 
 const gatewayBaseUrl = "/gateway-api";
@@ -93,6 +169,8 @@ export const requestGateway = async <T>(path: string, init?: RequestInit): Promi
 export const fetchHealth = () => requestGateway<{ ok: boolean }>("/healthz");
 
 export const fetchAccounts = () => requestGateway<AccountRow[]>("/admin/accounts");
+
+export const fetchCdkOptions = () => requestGateway<CdkOptionsResponse>("/admin/cdks/options");
 
 export const triggerQuotaPoll = () =>
   requestGateway<{ ok: boolean }>("/admin/poll", { method: "POST" });
@@ -120,6 +198,23 @@ export const deleteAccount = (accountId: string) =>
     method: "DELETE",
   });
 
+export const upgradeAccountSubscription = (
+  accountId: string,
+  payload?: {
+    productType?: string;
+    cdkey?: string;
+    force?: boolean;
+    sessionInfo?: string | null;
+  },
+) =>
+  requestGateway<AccountUpgradeResponse>(`/admin/accounts/${encodeURIComponent(accountId)}/upgrade`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload ?? {}),
+  });
+
 export const startChatgptCapture = (payload?: {
   profileKey?: string;
   timeoutMs?: number;
@@ -144,6 +239,7 @@ export const saveChatgptCaptureTask = (
   payload?: {
     id?: string;
     name?: string;
+    workspace?: WorkspaceContext;
   },
 ) =>
   requestGateway<{ ok: boolean; account: AccountRow }>(
@@ -154,5 +250,44 @@ export const saveChatgptCaptureTask = (
         "content-type": "application/json",
       },
       body: JSON.stringify(payload ?? {}),
+    },
+  );
+
+export const fetchGatewayTokens = () =>
+  requestGateway<GatewayTokenListPayload>("/admin/tokens");
+
+export const createGatewayToken = (payload: { name?: string; ttlSeconds?: number | null }) =>
+  requestGateway<{
+    ok: boolean;
+    token: string;
+    authHeader: string;
+    item: GatewayManagedTokenItem;
+  }>("/admin/tokens", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+export const updateGatewayTokenTtl = (tokenId: string, ttlSeconds: number | null) =>
+  requestGateway<{ ok: boolean; item: GatewayManagedTokenItem }>(
+    `/admin/tokens/${encodeURIComponent(tokenId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        ttlSeconds,
+      }),
+    },
+  );
+
+export const revokeGatewayToken = (tokenId: string) =>
+  requestGateway<{ ok: boolean; item: GatewayManagedTokenItem }>(
+    `/admin/tokens/${encodeURIComponent(tokenId)}`,
+    {
+      method: "DELETE",
     },
   );

@@ -7,6 +7,7 @@ import DashboardScorePanel from "../components/dashboard/DashboardScorePanel.vue
 import { useDashboard } from "../composables/use-dashboard.ts";
 
 const {
+  accounts,
   errorMessage,
   logs,
   metricCards,
@@ -49,15 +50,20 @@ const {
     </div>
 
     <DashboardMetricGrid :cards="metricCards" />
-    <DashboardScorePanel :selected-decision="selectedDecision" :breakdown="selectedBreakdown" />
+    <DashboardScorePanel
+      :selected-decision="selectedDecision"
+      :breakdown="selectedBreakdown"
+      :accounts="accounts"
+    />
 
     <section class="dashboard-grid dashboard-grid--logs">
       <DashboardDecisionPanel
+        :accounts="accounts"
         :decisions="logs.decisions"
         :selected-decision-id="selectedDecisionId"
         @select="selectDecision"
       />
-      <DashboardRequestPanel :requests="logs.requests" />
+      <DashboardRequestPanel :accounts="accounts" :requests="logs.requests" />
     </section>
   </div>
 </template>

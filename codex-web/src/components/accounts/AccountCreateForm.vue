@@ -6,6 +6,8 @@ import {
   getChatgptCaptureTask,
   saveChatgptCaptureTask,
   startChatgptCapture,
+  type WorkspaceContext,
+  type WorkspaceKind,
 } from "../../services/gateway-api.ts";
 
 const emit = defineEmits<{
@@ -24,6 +26,10 @@ const captureTaskId = ref("");
 const captureState = ref<"idle" | "running" | "completed" | "failed">("idle");
 const captureProgressMessage = ref("");
 const captureBusy = ref(false);
+const workspaceKind = ref<WorkspaceKind>("unknown");
+const workspaceId = ref("");
+const workspaceName = ref("");
+const workspaceHeadersPayload = ref("");
 let captureTimer: number | null = null;
 
 const makeAccountIdFromEmail = (email: string) =>
@@ -35,6 +41,46 @@ const makeAccountIdFromEmail = (email: string) =>
 const setFormFeedback = (message: string, tone: "success" | "error") => {
   formFeedback.value = message;
   formFeedbackTone.value = tone;
+};
+
+const parseWorkspaceHeaders = (payload: string) => {
+  const trimmed = payload.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error("工作空间请求头必须是 JSON 对象。");
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("工作空间请求头必须是 JSON 对象。");
+  }
+
+  const entries = Object.entries(parsed).map(([key, value]) => {
+    if (typeof value !== "string") {
+      throw new Error(`工作空间请求头 "${key}" 的值必须是字符串。`);
+    }
+    return [key, value] as const;
+  });
+
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
+};
+
+const mergeWorkspaceContext = (detected: WorkspaceContext | null): WorkspaceContext => {
+  const headers = parseWorkspaceHeaders(workspaceHeadersPayload.value) ?? detected?.headers ?? null;
+  const resolvedKind =
+    workspaceKind.value === "unknown" ? (detected?.kind ?? "unknown") : workspaceKind.value;
+
+  return {
+    kind: resolvedKind,
+    id: workspaceId.value.trim() || detected?.id || null,
+    name: workspaceName.value.trim() || detected?.name || null,
+    headers,
+  };
 };
 
 const stopCapturePolling = () => {
@@ -57,7 +103,9 @@ const pollCaptureTask = async () => {
     if (task.state === "completed") {
       stopCapturePolling();
       captureBusy.value = false;
-      const saveResult = await saveChatgptCaptureTask(task.id);
+      const saveResult = await saveChatgptCaptureTask(task.id, {
+        workspace: mergeWorkspaceContext(task.result?.workspace ?? null),
+      });
       setFormFeedback(`浏览器登录采集成功，已保存账号 ${saveResult.account.name}。`, "success");
       emit("created");
     } else if (task.state === "failed") {
@@ -117,6 +165,8 @@ const createAccountBySessionPayload = async (payload: string) => {
       mode: "bearer",
       token: result.accessToken,
     },
+    workspace: mergeWorkspaceContext(result.workspace),
+    sessionInfo: payload.trim(),
   });
 };
 
@@ -142,7 +192,7 @@ const submitAccount = async () => {
     setFormFeedback(error instanceof Error ? error.message : "账号保存失败。", "error");
   } finally {
     submitting.value = false;
-    }
+  }
 };
 
 onUnmounted(() => {
@@ -228,6 +278,57 @@ onUnmounted(() => {
       </label>
     </section>
 
+    <section class="account-add-panel">
+      <h3 class="account-add-panel__title">团队空间配置（可选）</h3>
+      <p class="account-add-panel__hint">
+        用于显式标记账号属于个人/团队空间，并可配置 workspace 请求头以稳定拉取团队 Codex 额度。
+      </p>
+
+      <div class="dashboard-form__grid account-workspace-grid">
+        <label class="dashboard-field">
+          <span>空间类型</span>
+          <select v-model="workspaceKind" class="dashboard-select">
+            <option value="unknown">自动识别</option>
+            <option value="personal">个人空间</option>
+            <option value="team">团队空间</option>
+          </select>
+        </label>
+
+        <label class="dashboard-field">
+          <span>空间名称（可选）</span>
+          <input
+            v-model="workspaceName"
+            class="dashboard-input dashboard-input--light"
+            type="text"
+            spellcheck="false"
+            placeholder="例如：codexcn 团队空间"
+          />
+        </label>
+
+        <label class="dashboard-field">
+          <span>空间 ID（可选）</span>
+          <input
+            v-model="workspaceId"
+            class="dashboard-input dashboard-input--light"
+            type="text"
+            spellcheck="false"
+            placeholder="例如：ws_xxx / org_xxx"
+          />
+        </label>
+
+        <label class="dashboard-field dashboard-field--full">
+          <span>空间请求头 JSON（可选）</span>
+          <textarea
+            v-model="workspaceHeadersPayload"
+            class="dashboard-textarea"
+            rows="4"
+            spellcheck="false"
+            placeholder='例如：{"x-openai-account-id":"ws_xxx"}'
+          />
+        </label>
+      </div>
+    </section>
+
     <div class="dashboard-form__footer">
       <div>
         <div
@@ -290,6 +391,10 @@ onUnmounted(() => {
   grid-template-columns: 1fr;
 }
 
+.account-workspace-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .dashboard-field {
   display: grid;
   gap: 8px;
@@ -306,6 +411,7 @@ onUnmounted(() => {
 }
 
 .dashboard-input,
+.dashboard-select,
 .dashboard-textarea {
   width: 100%;
   min-height: 50px;
@@ -322,6 +428,7 @@ onUnmounted(() => {
 }
 
 .dashboard-input:focus,
+.dashboard-select:focus,
 .dashboard-textarea:focus {
   outline: none;
   border-color: rgba(216, 109, 57, 0.34);
@@ -408,6 +515,10 @@ onUnmounted(() => {
 }
 
 @media (max-width: 920px) {
+  .account-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
   .dashboard-form__footer {
     flex-direction: column;
     align-items: stretch;

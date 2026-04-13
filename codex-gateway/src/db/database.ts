@@ -5,11 +5,14 @@ import type {
   Account,
   AccountStatus,
   DecisionLog,
+  GatewayManagedToken,
   QuotaReservation,
   QuotaSnapshot,
   RequestLog,
   RuntimeLog,
   SessionBinding,
+  SubscriptionStatus,
+  WorkspaceKind,
 } from "../types.js";
 
 const readSchema = () => readFileSync(new URL("../../src/db/schema.sql", import.meta.url), "utf8");
@@ -33,6 +36,51 @@ const toText = (value: unknown) => {
 const toNullableText = (value: unknown) =>
   value === null || value === undefined ? null : toText(value);
 
+const parseNullableStringMap = (value: unknown): Record<string, string> | null => {
+  const text = toNullableText(value);
+  if (!text) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    return Object.fromEntries(
+      Object.entries(parsed).flatMap(([key, mapValue]) =>
+        typeof mapValue === "string" ? [[key, mapValue]] : [],
+      ),
+    );
+  } catch {
+    return null;
+  }
+};
+
+const parseWorkspaceKind = (value: unknown): WorkspaceKind => {
+  const normalized = toNullableText(value)?.trim().toLowerCase();
+  if (normalized === "personal" || normalized === "team" || normalized === "unknown") {
+    return normalized;
+  }
+
+  return "unknown";
+};
+
+const parseSubscriptionStatus = (value: unknown): SubscriptionStatus => {
+  const normalized = toNullableText(value)?.trim().toLowerCase();
+  if (
+    normalized === "active" ||
+    normalized === "trial" ||
+    normalized === "inactive" ||
+    normalized === "unknown"
+  ) {
+    return normalized;
+  }
+
+  return "unknown";
+};
+
 const parseAccount = (row: Record<string, unknown>): Account => ({
   id: toText(row.id),
   name: toText(row.name),
@@ -41,6 +89,16 @@ const parseAccount = (row: Record<string, unknown>): Account => ({
   quotaPath: toText(row.quota_path),
   proxyPathPrefix: toText(row.proxy_path_prefix),
   auth: JSON.parse(toText(row.auth_json)),
+  workspace: {
+    kind: parseWorkspaceKind(row.workspace_kind),
+    id: toNullableText(row.workspace_id),
+    name: toNullableText(row.workspace_name),
+    headers: parseNullableStringMap(row.workspace_headers_json),
+  },
+  subscription: {
+    planType: toNullableText(row.subscription_plan_type),
+    status: parseSubscriptionStatus(row.subscription_status),
+  },
   status: row.status as AccountStatus,
   successCount: Number(row.success_count),
   failureCount: Number(row.failure_count),
@@ -51,6 +109,17 @@ const parseAccount = (row: Record<string, unknown>): Account => ({
   lastErrorMessage: toNullableText(row.last_error_message),
   createdAt: toText(row.created_at),
   updatedAt: toText(row.updated_at),
+});
+
+const parseGatewayManagedToken = (row: Record<string, unknown>): GatewayManagedToken => ({
+  id: toText(row.id),
+  name: toText(row.name),
+  tokenHash: toText(row.token_hash),
+  tokenPreview: toText(row.token_preview),
+  createdAt: toText(row.created_at),
+  expiresAt: toNullableText(row.expires_at),
+  revokedAt: toNullableText(row.revoked_at),
+  lastUsedAt: toNullableText(row.last_used_at),
 });
 
 export class GatewayDatabase {
@@ -64,10 +133,174 @@ export class GatewayDatabase {
 
   init() {
     this.sqlite.exec(readSchema());
+    this.applyMigrations();
   }
 
   close() {
     this.sqlite.close();
+  }
+
+  private applyMigrations() {
+    const columns = this.sqlite
+      .prepare("PRAGMA table_info(accounts)")
+      .all() as Array<{ name?: unknown }>;
+    const existing = new Set(
+      columns
+        .map((column) => toNullableText(column.name)?.toLowerCase())
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    if (!existing.has("workspace_kind")) {
+      this.sqlite.exec(
+        "ALTER TABLE accounts ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT 'unknown'",
+      );
+    }
+    if (!existing.has("workspace_id")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN workspace_id TEXT");
+    }
+    if (!existing.has("workspace_name")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN workspace_name TEXT");
+    }
+    if (!existing.has("workspace_headers_json")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN workspace_headers_json TEXT");
+    }
+    if (!existing.has("subscription_plan_type")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN subscription_plan_type TEXT");
+    }
+    if (!existing.has("subscription_status")) {
+      this.sqlite.exec(
+        "ALTER TABLE accounts ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'unknown'",
+      );
+    }
+  }
+
+  getRuntimeSetting(key: string) {
+    const row = this.sqlite
+      .prepare("SELECT value FROM runtime_settings WHERE key = ? LIMIT 1")
+      .get(key) as { value?: unknown } | undefined;
+    return row ? toNullableText(row.value) : null;
+  }
+
+  setRuntimeSetting(key: string, value: string) {
+    this.sqlite
+      .prepare(
+        `
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+        `,
+      )
+      .run(key, value, nowIso());
+  }
+
+  deleteRuntimeSetting(key: string) {
+    this.sqlite.prepare("DELETE FROM runtime_settings WHERE key = ?").run(key);
+  }
+
+  getPollIntervalMs() {
+    const stored = this.getRuntimeSetting("poll_interval_ms");
+    if (!stored) {
+      return null;
+    }
+
+    const parsed = Number(stored);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null;
+    }
+
+    return Math.floor(parsed);
+  }
+
+  setPollIntervalMs(intervalMs: number) {
+    const normalized = Math.max(1_000, Math.floor(intervalMs));
+    this.setRuntimeSetting("poll_interval_ms", String(normalized));
+    return normalized;
+  }
+
+  createGatewayToken(token: GatewayManagedToken) {
+    this.sqlite
+      .prepare(
+        `
+        INSERT INTO gateway_tokens (
+          id, name, token_hash, token_preview, created_at, expires_at, revoked_at, last_used_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+      )
+      .run(
+        token.id,
+        token.name,
+        token.tokenHash,
+        token.tokenPreview,
+        token.createdAt,
+        token.expiresAt,
+        token.revokedAt,
+        token.lastUsedAt,
+      );
+  }
+
+  listGatewayTokens() {
+    const rows = this.sqlite
+      .prepare("SELECT * FROM gateway_tokens ORDER BY created_at DESC")
+      .all() as Record<string, unknown>[];
+    return rows.map(parseGatewayManagedToken);
+  }
+
+  getGatewayTokenById(tokenId: string) {
+    const row = this.sqlite.prepare("SELECT * FROM gateway_tokens WHERE id = ?").get(tokenId) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? parseGatewayManagedToken(row) : null;
+  }
+
+  getGatewayTokenByHash(tokenHash: string) {
+    const row = this.sqlite
+      .prepare("SELECT * FROM gateway_tokens WHERE token_hash = ? LIMIT 1")
+      .get(tokenHash) as Record<string, unknown> | undefined;
+    return row ? parseGatewayManagedToken(row) : null;
+  }
+
+  updateGatewayTokenExpiry(tokenId: string, expiresAt: string | null) {
+    const result = this.sqlite
+      .prepare(
+        `
+        UPDATE gateway_tokens
+        SET expires_at = ?
+        WHERE id = ?
+        `,
+      )
+      .run(expiresAt, tokenId);
+
+    return Number(result.changes ?? 0);
+  }
+
+  revokeGatewayToken(tokenId: string, revokedAt = nowIso()) {
+    const result = this.sqlite
+      .prepare(
+        `
+        UPDATE gateway_tokens
+        SET revoked_at = ?
+        WHERE id = ? AND revoked_at IS NULL
+        `,
+      )
+      .run(revokedAt, tokenId);
+
+    return Number(result.changes ?? 0);
+  }
+
+  touchGatewayTokenLastUsed(tokenId: string, lastUsedAt = nowIso()) {
+    const result = this.sqlite
+      .prepare(
+        `
+        UPDATE gateway_tokens
+        SET last_used_at = ?
+        WHERE id = ?
+        `,
+      )
+      .run(lastUsedAt, tokenId);
+
+    return Number(result.changes ?? 0);
   }
 
   upsertAccount(
@@ -80,10 +313,14 @@ export class GatewayDatabase {
         `
         INSERT INTO accounts (
           id, name, provider, upstream_base_url, quota_path, proxy_path_prefix, auth_json,
+          workspace_kind, workspace_id, workspace_name, workspace_headers_json,
+          subscription_plan_type, subscription_status,
           status, success_count, failure_count, consecutive_failures, consecutive_429,
           cooldown_until, last_error_code, last_error_message, created_at, updated_at
         ) VALUES (
           @id, @name, @provider, @upstreamBaseUrl, @quotaPath, @proxyPathPrefix, @authJson,
+          @workspaceKind, @workspaceId, @workspaceName, @workspaceHeadersJson,
+          @subscriptionPlanType, @subscriptionStatus,
           @status, @successCount, @failureCount, @consecutiveFailures, @consecutive429,
           @cooldownUntil, @lastErrorCode, @lastErrorMessage, @createdAt, @updatedAt
         )
@@ -94,6 +331,12 @@ export class GatewayDatabase {
           quota_path = excluded.quota_path,
           proxy_path_prefix = excluded.proxy_path_prefix,
           auth_json = excluded.auth_json,
+          workspace_kind = excluded.workspace_kind,
+          workspace_id = excluded.workspace_id,
+          workspace_name = excluded.workspace_name,
+          workspace_headers_json = excluded.workspace_headers_json,
+          subscription_plan_type = excluded.subscription_plan_type,
+          subscription_status = excluded.subscription_status,
           status = excluded.status,
           success_count = excluded.success_count,
           failure_count = excluded.failure_count,
@@ -113,6 +356,14 @@ export class GatewayDatabase {
         "@quotaPath": account.quotaPath,
         "@proxyPathPrefix": account.proxyPathPrefix,
         "@authJson": JSON.stringify(account.auth),
+        "@workspaceKind": account.workspace.kind,
+        "@workspaceId": account.workspace.id,
+        "@workspaceName": account.workspace.name,
+        "@workspaceHeadersJson": account.workspace.headers
+          ? JSON.stringify(account.workspace.headers)
+          : null,
+        "@subscriptionPlanType": account.subscription.planType,
+        "@subscriptionStatus": account.subscription.status,
         "@status": account.status,
         "@successCount": account.successCount,
         "@failureCount": account.failureCount,
@@ -148,6 +399,7 @@ export class GatewayDatabase {
         Account,
         | "id"
         | "auth"
+        | "workspace"
         | "name"
         | "provider"
         | "upstreamBaseUrl"
@@ -347,11 +599,78 @@ export class GatewayDatabase {
   }
 
   reconcileAdjustments(accountId: string) {
-    this.sqlite
+    const result = this.sqlite
       .prepare(
         "UPDATE quota_adjustments SET reconciled = 1 WHERE account_id = ? AND reconciled = 0",
       )
       .run(accountId);
+
+    return Number(result.changes ?? 0);
+  }
+
+  consumeUnreconciledAdjustments(accountId: string, units: number) {
+    const targetUnits = Math.max(0, Math.floor(units));
+    if (targetUnits <= 0) {
+      return 0;
+    }
+
+    const rows = this.sqlite
+      .prepare(
+        `
+        SELECT id, units
+        FROM quota_adjustments
+        WHERE account_id = ? AND reconciled = 0
+        ORDER BY id ASC
+        `,
+      )
+      .all(accountId) as Array<{ id: number; units: number }>;
+
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    const reconcileStmt = this.sqlite.prepare(
+      "UPDATE quota_adjustments SET reconciled = 1 WHERE id = ?",
+    );
+    const reduceStmt = this.sqlite.prepare(
+      "UPDATE quota_adjustments SET units = ? WHERE id = ?",
+    );
+
+    let remaining = targetUnits;
+    let consumed = 0;
+
+    this.sqlite.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        if (remaining <= 0) {
+          break;
+        }
+
+        const parsedUnits = Number(row.units);
+        const rowUnits = Number.isFinite(parsedUnits) ? Math.max(0, parsedUnits) : 0;
+        if (rowUnits <= 0) {
+          reconcileStmt.run(row.id);
+          continue;
+        }
+
+        if (rowUnits <= remaining) {
+          reconcileStmt.run(row.id);
+          consumed += rowUnits;
+          remaining -= rowUnits;
+          continue;
+        }
+
+        reduceStmt.run(rowUnits - remaining, row.id);
+        consumed += remaining;
+        remaining = 0;
+      }
+
+      this.sqlite.exec("COMMIT");
+      return consumed;
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   logDecision(entry: DecisionLog) {

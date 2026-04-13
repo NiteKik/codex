@@ -6,6 +6,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   quota_path TEXT NOT NULL,
   proxy_path_prefix TEXT NOT NULL,
   auth_json TEXT NOT NULL,
+  workspace_kind TEXT NOT NULL DEFAULT 'unknown',
+  workspace_id TEXT,
+  workspace_name TEXT,
+  workspace_headers_json TEXT,
+  subscription_plan_type TEXT,
+  subscription_status TEXT NOT NULL DEFAULT 'unknown',
   status TEXT NOT NULL,
   success_count INTEGER NOT NULL DEFAULT 0,
   failure_count INTEGER NOT NULL DEFAULT 0,
@@ -115,3 +121,23 @@ CREATE TABLE IF NOT EXISTS runtime_logs (
 
 CREATE INDEX IF NOT EXISTS idx_runtime_logs_created
   ON runtime_logs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS runtime_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gateway_tokens (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  token_preview TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  revoked_at TEXT,
+  last_used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_gateway_tokens_status
+  ON gateway_tokens(revoked_at, expires_at, created_at DESC);

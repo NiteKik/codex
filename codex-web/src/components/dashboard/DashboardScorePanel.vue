@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import type { AccountRow, WorkspaceKind } from "../../services/gateway-api.ts";
 import {
   formatDashboardDateTime,
   formatDashboardPercent,
@@ -8,12 +9,106 @@ import {
   type ScoreBreakdown,
 } from "./dashboard-model.ts";
 
+const scoreWeights = Object.freeze({
+  weekly: 0.35,
+  window: 0.4,
+  health: 0.2,
+  error: 0.15,
+  switching: 0.12,
+});
+
+const workspaceKindLabelMap: Record<WorkspaceKind, string> = {
+  personal: "个人",
+  team: "团队",
+  unknown: "未识别",
+};
+
 const props = defineProps<{
   selectedDecision: DashboardDecisionLog | null;
   breakdown: ScoreBreakdown[];
+  accounts: AccountRow[];
 }>();
 
 const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry.total), 0.01));
+
+const accountsById = computed(() => {
+  const map = new Map<string, AccountRow>();
+  for (const account of props.accounts) {
+    map.set(account.id, account);
+  }
+  return map;
+});
+
+const resolveAccountIdentity = (accountId: string) => {
+  const account = accountsById.value.get(accountId);
+  if (!account) {
+    return {
+      name: accountId,
+      id: accountId,
+      workspaceKind: "unknown" as WorkspaceKind,
+      workspaceKindLabel: "未知空间",
+      workspaceName: null as string | null,
+    };
+  }
+
+  return {
+    name: account.name || account.id,
+    id: account.id,
+    workspaceKind: account.workspace.kind,
+    workspaceKindLabel: workspaceKindLabelMap[account.workspace.kind] ?? "未识别",
+    workspaceName: account.workspace.name,
+  };
+};
+
+const selectedIdentity = computed(() => {
+  if (!props.selectedDecision) {
+    return null;
+  }
+  return resolveAccountIdentity(props.selectedDecision.selected_account_id);
+});
+
+const scoreCards = computed(() =>
+  props.breakdown.map((item) => ({
+    ...item,
+    identity: resolveAccountIdentity(item.accountId),
+    contributions: {
+      weekly: item.weeklyRemainingRatio * scoreWeights.weekly,
+      window: item.windowRemainingRatio * scoreWeights.window,
+      health: item.healthScore * scoreWeights.health,
+      error: -(item.recentErrorPenalty * scoreWeights.error),
+      switching: -(item.switchingCost * scoreWeights.switching),
+      sticky: item.stickyBonus,
+    },
+  })),
+);
+
+const formatContribution = (value: number) => {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "0";
+  return `${sign}${Math.abs(value).toFixed(3)}`;
+};
+
+const formatRemainingUnits = (value: number | undefined) =>
+  typeof value === "number" && Number.isFinite(value) ? value.toFixed(0) : "-";
+
+const formatResetInMs = (value: number | null | undefined) => {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "未知";
+  }
+
+  const totalSeconds = Math.max(0, Math.round(value / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes} 分`;
+  }
+
+  return `${Math.max(1, totalSeconds)} 秒`;
+};
 </script>
 
 <template>
@@ -25,7 +120,7 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
           <div>
             <span class="section-kicker">Scheduler</span>
             <h2>调度分数明细</h2>
-            <p>点击下方调度决策记录，查看打分拆解与命中原因。</p>
+            <p>按账号展示最终得分、构成项和预留策略，便于快速判断为什么命中该账号。</p>
           </div>
         </div>
 
@@ -40,27 +135,54 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
             <div class="score-detail__summary">
               <div>
                 <span class="section-kicker">Selected</span>
-                <h3>{{ selectedDecision.selected_account_id }}</h3>
-                <p>原因：{{ getDashboardReasonLabel(selectedDecision.reason) }}</p>
+                <h3>{{ selectedIdentity?.name ?? selectedDecision.selected_account_id }}</h3>
+                <p>
+                  账号 <code>{{ selectedIdentity?.id ?? selectedDecision.selected_account_id }}</code> ·
+                  {{ selectedIdentity?.workspaceKindLabel ?? "未知空间" }}
+                  <template v-if="selectedIdentity?.workspaceName">
+                    · {{ selectedIdentity.workspaceName }}
+                  </template>
+                </p>
+                <p>
+                  原因：{{ getDashboardReasonLabel(selectedDecision.reason) }}
+                </p>
               </div>
               <div class="score-detail__meta">
-                <div>Session <code>{{ selectedDecision.session_id }}</code></div>
-                <div>请求 <code>{{ selectedDecision.request_id }}</code></div>
-                <div>{{ formatDashboardDateTime(selectedDecision.created_at) }}</div>
+                <div>
+                  Session <code>{{ selectedDecision.session_id }}</code>
+                </div>
+                <div>
+                  请求 <code>{{ selectedDecision.request_id }}</code>
+                </div>
+                <div>
+                  {{ formatDashboardDateTime(selectedDecision.created_at) }}
+                </div>
               </div>
             </div>
 
             <div class="score-chip-grid">
               <article
-                v-for="item in breakdown"
+                v-for="item in scoreCards"
                 :key="item.accountId"
                 class="score-card"
-                :class="{ 'score-card--selected': item.accountId === selectedDecision.selected_account_id }"
+                :class="{
+                  'score-card--selected':
+                    item.accountId === selectedDecision.selected_account_id,
+                }"
               >
                 <div class="score-card__top">
-                  <strong>{{ item.accountId }}</strong>
-                  <span>{{ item.total.toFixed(3) }}</span>
+                  <div class="score-card__account">
+                    <strong>{{ item.identity.name }}</strong>
+                    <small>
+                      账号 <code>{{ item.identity.id }}</code> · {{ item.identity.workspaceKindLabel }}
+                      <template v-if="item.identity.workspaceName">
+                        · {{ item.identity.workspaceName }}
+                      </template>
+                    </small>
+                  </div>
+                  <span class="score-card__total">{{ item.total.toFixed(3) }}</span>
                 </div>
+
                 <div class="score-bar">
                   <div
                     class="score-bar__fill"
@@ -69,13 +191,49 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
                     }"
                   />
                 </div>
+
+                <div class="score-card__formula">
+                  <span>周 {{ formatContribution(item.contributions.weekly) }}</span>
+                  <span>窗口 {{ formatContribution(item.contributions.window) }}</span>
+                  <span>健康 {{ formatContribution(item.contributions.health) }}</span>
+                  <span>错误 {{ formatContribution(item.contributions.error) }}</span>
+                  <span>切换 {{ formatContribution(item.contributions.switching) }}</span>
+                  <span>粘滞 {{ formatContribution(item.contributions.sticky) }}</span>
+                </div>
+
                 <dl class="score-card__grid">
-                  <div><dt>周剩余</dt><dd>{{ formatDashboardPercent(item.weeklyRemainingRatio) }}</dd></div>
-                  <div><dt>窗口剩余</dt><dd>{{ formatDashboardPercent(item.windowRemainingRatio) }}</dd></div>
-                  <div><dt>健康度</dt><dd>{{ item.healthScore.toFixed(3) }}</dd></div>
-                  <div><dt>错误惩罚</dt><dd>{{ item.recentErrorPenalty.toFixed(3) }}</dd></div>
-                  <div><dt>切换成本</dt><dd>{{ item.switchingCost.toFixed(3) }}</dd></div>
-                  <div><dt>粘滞加成</dt><dd>{{ item.stickyBonus.toFixed(3) }}</dd></div>
+                  <div>
+                    <dt>周剩余</dt>
+                    <dd>{{ formatDashboardPercent(item.weeklyRemainingRatio) }}</dd>
+                  </div>
+                  <div>
+                    <dt>5h 剩余</dt>
+                    <dd>{{ formatDashboardPercent(item.windowRemainingRatio) }}</dd>
+                  </div>
+                  <div>
+                    <dt>健康度</dt>
+                    <dd>{{ item.healthScore.toFixed(3) }}</dd>
+                  </div>
+                  <div>
+                    <dt>预留策略</dt>
+                    <dd>{{ item.preemptiveEligible === false ? "门槛放宽" : "满足门槛" }}</dd>
+                  </div>
+                  <div>
+                    <dt>请求后周剩余</dt>
+                    <dd>{{ formatRemainingUnits(item.weeklyRemainingAfterRequest) }}</dd>
+                  </div>
+                  <div>
+                    <dt>请求后 5h 剩余</dt>
+                    <dd>{{ formatRemainingUnits(item.windowRemainingAfterRequest) }}</dd>
+                  </div>
+                  <div>
+                    <dt>周重置倒计时</dt>
+                    <dd>{{ formatResetInMs(item.weeklyResetInMs) }}</dd>
+                  </div>
+                  <div>
+                    <dt>5h 重置倒计时</dt>
+                    <dd>{{ formatResetInMs(item.windowResetInMs) }}</dd>
+                  </div>
                 </dl>
               </article>
             </div>
@@ -88,8 +246,7 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
 
 <style scoped>
 .dashboard-grid--manage {
-  display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  display: flex;
   gap: 20px;
 }
 
@@ -158,6 +315,7 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
 
 .score-detail__summary {
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
@@ -170,7 +328,7 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
 
 .score-detail__summary p,
 .score-detail__meta {
-  color: rgba(246, 239, 230, 0.78);
+  color: rgba(246, 239, 230, 0.8);
 }
 
 .score-detail__summary h3 {
@@ -207,14 +365,30 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
 
 .score-card__top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.score-card__top strong,
-.score-card__grid dd {
+.score-card__account {
+  display: grid;
+  gap: 4px;
+}
+
+.score-card__account strong,
+.score-card__grid dd,
+.score-card__total {
   font-family: var(--font-heading);
+}
+
+.score-card__account small {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.score-card__total {
+  font-size: 1.05rem;
 }
 
 .score-bar {
@@ -228,6 +402,24 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #d86d39, #b94d1d);
+}
+
+.score-card__formula {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.score-card__formula span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(20, 33, 61, 0.06);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .score-card__grid {
@@ -250,7 +442,7 @@ const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry
 
 .score-card__grid dd {
   margin: 6px 0 0;
-  font-size: 0.98rem;
+  font-size: 0.96rem;
 }
 
 @media (max-width: 1080px) {

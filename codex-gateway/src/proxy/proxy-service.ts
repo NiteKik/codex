@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { AccountManager } from "../accounts/account-manager.js";
 import { config } from "../config.js";
 import { GatewayDatabase } from "../db/database.js";
+import type { Account } from "../types.js";
 import type { ProviderClient } from "../providers/provider-client.js";
 import { QuotaVirtualizer } from "../quota/quota-virtualizer.js";
 import { Scheduler } from "../scheduler/scheduler.js";
@@ -12,13 +13,92 @@ import { nowIso } from "../utils/time.js";
 
 const retryableStatuses = new Set([401, 403, 429, 502, 503, 504]);
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const collectTextLengthFromContent = (content: unknown) => {
+  if (typeof content === "string") {
+    return content.length;
+  }
+
+  if (Array.isArray(content)) {
+    const total = content.reduce((sum, part) => {
+      if (!isRecord(part)) {
+        return sum;
+      }
+      const textValue = part.text;
+      return typeof textValue === "string" ? sum + textValue.length : sum;
+    }, 0);
+    return total > 0 ? total : null;
+  }
+
+  return null;
+};
+
+const extractLatestUserTextLength = (body: unknown): number | null => {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const collectFromMessages = (value: unknown) => {
+    if (!Array.isArray(value)) {
+      return null;
+    }
+
+    let latest: number | null = null;
+    for (const item of value) {
+      if (!isRecord(item)) {
+        continue;
+      }
+
+      if (item.role !== "user") {
+        continue;
+      }
+
+      const length =
+        collectTextLengthFromContent(item.content) ??
+        (typeof item.input === "string" ? item.input.length : null);
+      if (typeof length === "number" && length > 0) {
+        latest = length;
+      }
+    }
+
+    return latest;
+  };
+
+  const fromInputMessages = collectFromMessages(body.input);
+  if (fromInputMessages !== null) {
+    return fromInputMessages;
+  }
+
+  const fromChatMessages = collectFromMessages(body.messages);
+  if (fromChatMessages !== null) {
+    return fromChatMessages;
+  }
+
+  if (typeof body.input === "string" && body.input.length > 0) {
+    return body.input.length;
+  }
+
+  return null;
+};
+
 const estimateUnits = (body: unknown) => {
   if (!body) {
     return 1;
   }
 
   const serialized = typeof body === "string" ? body : JSON.stringify(body);
-  return Math.max(1, Math.ceil(serialized.length / 180));
+  const payloadEstimated = Math.ceil(serialized.length / config.estimatedUnitBytes);
+  const latestUserLength = extractLatestUserTextLength(body);
+  const latestUserEstimated =
+    latestUserLength === null ? payloadEstimated : Math.ceil(latestUserLength / config.estimatedUnitBytes);
+  // Prefer latest user input size, but keep a small context overhead.
+  const estimated = Math.min(
+    payloadEstimated,
+    latestUserEstimated + config.estimatedContextOverheadUnits,
+  );
+  return Math.min(config.maxEstimatedUnitsPerRequest, Math.max(1, estimated));
 };
 
 const serializeBody = (body: unknown) => {
@@ -35,6 +115,27 @@ const serializeBody = (body: unknown) => {
   }
 
   return Buffer.from(JSON.stringify(body));
+};
+
+const isNoSchedulableError = (error: unknown) =>
+  error instanceof Error && error.message.includes("No schedulable account is available.");
+
+const isResponsesPath = (path: string) =>
+  path === "/responses" ||
+  path.startsWith("/responses/") ||
+  path === "/v1/responses" ||
+  path.startsWith("/v1/responses/");
+
+const getResponsesSuffix = (path: string) => {
+  if (path.startsWith("/v1/responses")) {
+    return path.slice("/v1/responses".length);
+  }
+
+  if (path.startsWith("/responses")) {
+    return path.slice("/responses".length);
+  }
+
+  return "";
 };
 
 export class ProxyService {
@@ -62,7 +163,7 @@ export class ProxyService {
       request.headers["x-session-id"] ?? request.headers["x-codex-session"],
     );
     const requestId = randomUUID();
-    const estimatedUnits = estimateUnits(request.body);
+    const initialEstimatedUnits = estimateUnits(request.body);
     const excludedAccountIds: string[] = [];
     const body = serializeBody(request.body);
     const queryString = request.url.includes("?")
@@ -74,16 +175,18 @@ export class ProxyService {
       const requestLogId = `${requestId}:${attempt}`;
       const startedAt = Date.now();
       let decision: ReturnType<Scheduler["schedule"]> | null = null;
+      let estimatedUnits = initialEstimatedUnits;
+      let estimateRelaxed = false;
 
       try {
-        decision = this.scheduler.schedule({
+        ({ decision, estimatedUnits, estimateRelaxed } = this.scheduleWithAdaptiveEstimate({
           requestId,
           sessionId,
           path: proxyPath,
           method: request.method,
-          estimatedUnits,
+          initialEstimatedUnits,
           excludedAccountIds,
-        });
+        }));
 
         this.db.logRequestStart({
           requestId: requestLogId,
@@ -101,13 +204,27 @@ export class ProxyService {
           finishedAt: null,
         });
 
+        const upstreamPath = this.resolveUpstreamPath(decision.account, proxyPath);
+        const upstreamBody = this.normalizeUpstreamBody(
+          upstreamPath,
+          request.method,
+          request.body,
+          body,
+        );
         const upstream = await this.provider.forward(decision.account, {
           method: request.method,
-          path: proxyPath,
+          path: upstreamPath,
           queryString,
           headers: request.headers,
-          body,
+          body: upstreamBody,
         });
+
+        const upstreamContentType = upstream.responseHeaders.get("content-type")?.toLowerCase() ?? "";
+        if (isResponsesPath(proxyPath) && upstreamContentType.includes("text/html")) {
+          throw new Error(
+            "Upstream returned HTML for responses endpoint. Verify path mapping/authentication.",
+          );
+        }
 
         if (retryableStatuses.has(upstream.upstreamStatus) && attempt < config.maxProxyAttempts) {
           this.accountManager.markFailure(decision.account.id, {
@@ -155,6 +272,10 @@ export class ProxyService {
         reply.header("x-session-id", sessionId);
         reply.header("x-routed-account-id", decision.account.id);
         reply.header("x-routing-reason", decision.reason);
+        if (estimateRelaxed) {
+          reply.header("x-estimated-units-relaxed", "1");
+          reply.header("x-estimated-units", String(estimatedUnits));
+        }
         if (upstream.isSse && upstream.streamResponse?.body) {
           reply.hijack();
           const headerObject: Record<string, string> = {
@@ -164,11 +285,19 @@ export class ProxyService {
             "x-session-id": sessionId,
             "x-routed-account-id": decision.account.id,
             "x-routing-reason": decision.reason,
+            ...(estimateRelaxed
+              ? {
+                  "x-estimated-units-relaxed": "1",
+                  "x-estimated-units": String(estimatedUnits),
+                }
+              : {}),
           };
 
           upstream.responseHeaders.forEach((value, key) => {
             if (
-              !["connection", "content-length", "transfer-encoding"].includes(key.toLowerCase())
+              !["connection", "content-length", "transfer-encoding", "content-encoding"].includes(
+                key.toLowerCase(),
+              )
             ) {
               headerObject[key] = value;
             }
@@ -217,5 +346,106 @@ export class ProxyService {
       error: "all_accounts_unavailable",
       message: lastError?.message ?? "No account available after retries.",
     });
+  }
+
+  private scheduleWithAdaptiveEstimate(input: {
+    requestId: string;
+    sessionId: string;
+    path: string;
+    method: string;
+    initialEstimatedUnits: number;
+    excludedAccountIds: string[];
+  }) {
+    const candidates = [
+      input.initialEstimatedUnits,
+      6,
+      3,
+      1,
+    ].filter((value, index, list) => value >= 1 && list.indexOf(value) === index);
+    let lastError: unknown = null;
+
+    for (const estimatedUnits of candidates) {
+      try {
+        const decision = this.scheduler.schedule({
+          requestId: input.requestId,
+          sessionId: input.sessionId,
+          path: input.path,
+          method: input.method,
+          estimatedUnits,
+          excludedAccountIds: input.excludedAccountIds,
+        });
+        return {
+          decision,
+          estimatedUnits,
+          estimateRelaxed: estimatedUnits !== input.initialEstimatedUnits,
+        };
+      } catch (error) {
+        lastError = error;
+        if (!isNoSchedulableError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+
+    throw new Error("No schedulable account is available.");
+  }
+
+  private resolveUpstreamPath(account: Account, proxyPath: string) {
+    if (!isResponsesPath(proxyPath)) {
+      return proxyPath;
+    }
+
+    const suffix = getResponsesSuffix(proxyPath);
+    const isChatgptProvider =
+      account.provider === "chatgpt-web-session" ||
+      account.upstreamBaseUrl.toLowerCase().includes("chatgpt.com");
+
+    if (isChatgptProvider) {
+      return `/backend-api/codex/responses${suffix}`;
+    }
+
+    return `/v1/responses${suffix}`;
+  }
+
+  private normalizeUpstreamBody(
+    upstreamPath: string,
+    method: string,
+    parsedBody: unknown,
+    serializedBody: Buffer | undefined,
+  ) {
+    if (!upstreamPath.startsWith("/backend-api/codex/responses")) {
+      return serializedBody;
+    }
+
+    if (method === "GET" || method === "HEAD" || !isRecord(parsedBody)) {
+      return serializedBody;
+    }
+
+    const payload: Record<string, unknown> = { ...parsedBody };
+    let changed = false;
+
+    if (payload.store !== false) {
+      payload.store = false;
+      changed = true;
+    }
+
+    if (payload.input !== undefined && !Array.isArray(payload.input)) {
+      if (typeof payload.input === "string") {
+        payload.input = [{ role: "user", content: payload.input }];
+      } else {
+        payload.input = [payload.input];
+      }
+      changed = true;
+    }
+
+    if (!changed) {
+      return serializedBody;
+    }
+
+    return Buffer.from(JSON.stringify(payload));
   }
 }

@@ -1,11 +1,14 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import type { AccountRow, WorkspaceKind } from "../../services/gateway-api.ts";
 import {
   formatDashboardDateTime,
   getDashboardReasonLabel,
   type DashboardDecisionLog,
 } from "./dashboard-model.ts";
 
-defineProps<{
+const props = defineProps<{
+  accounts: AccountRow[];
   decisions: DashboardDecisionLog[];
   selectedDecisionId: number | null;
 }>();
@@ -13,6 +16,46 @@ defineProps<{
 const emit = defineEmits<{
   select: [decisionId: number];
 }>();
+
+const workspaceKindLabelMap: Record<WorkspaceKind, string> = {
+  personal: "个人",
+  team: "团队",
+  unknown: "未识别",
+};
+
+const accountsById = computed(() => {
+  const map = new Map<string, AccountRow>();
+  for (const account of props.accounts) {
+    map.set(account.id, account);
+  }
+  return map;
+});
+
+const resolveAccountIdentity = (accountId: string) => {
+  const account = accountsById.value.get(accountId);
+  if (!account) {
+    return {
+      name: accountId,
+      id: accountId,
+      workspaceKindLabel: "未知空间",
+      workspaceName: null as string | null,
+    };
+  }
+
+  return {
+    name: account.name || account.id,
+    id: account.id,
+    workspaceKindLabel: workspaceKindLabelMap[account.workspace.kind] ?? "未识别",
+    workspaceName: account.workspace.name,
+  };
+};
+
+const readableDecisions = computed(() =>
+  props.decisions.map((decision) => ({
+    ...decision,
+    identity: resolveAccountIdentity(decision.selected_account_id),
+  })),
+);
 </script>
 
 <template>
@@ -26,12 +69,12 @@ const emit = defineEmits<{
     </div>
 
     <div class="log-list">
-      <template v-if="decisions.length === 0">
+      <template v-if="readableDecisions.length === 0">
         <div class="empty-card">暂无调度记录。</div>
       </template>
       <template v-else>
         <button
-          v-for="decision in decisions"
+          v-for="decision in readableDecisions"
           :key="decision.id"
           type="button"
           class="log-item log-item--interactive"
@@ -39,12 +82,21 @@ const emit = defineEmits<{
           @click="emit('select', decision.id)"
         >
           <div class="log-item__top">
-            <strong>{{ decision.selected_account_id }}</strong>
+            <div class="log-item__identity">
+              <strong>{{ decision.identity.name }}</strong>
+              <small>
+                账号 <code>{{ decision.identity.id }}</code> ·
+                {{ decision.identity.workspaceKindLabel }}
+                <template v-if="decision.identity.workspaceName">
+                  · {{ decision.identity.workspaceName }}
+                </template>
+              </small>
+            </div>
             <span class="tag">{{ getDashboardReasonLabel(decision.reason) }}</span>
           </div>
-          <p>Session <code>{{ decision.session_id }}</code></p>
+          <p>Session <code>{{ decision.session_id }}</code> · 请求 <code>{{ decision.request_id }}</code></p>
           <div class="log-item__footer">
-            <span>请求 <code>{{ decision.request_id }}</code></span>
+            <span>决策编号 #{{ decision.id }}</span>
             <span>{{ formatDashboardDateTime(decision.created_at) }}</span>
           </div>
         </button>
@@ -116,6 +168,11 @@ const emit = defineEmits<{
 .log-list {
   display: grid;
   gap: 12px;
+  max-height: clamp(320px, 52vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
 }
 
 .log-item {
@@ -139,6 +196,17 @@ const emit = defineEmits<{
 
 .log-item__top strong {
   font-family: var(--font-heading);
+}
+
+.log-item__identity {
+  display: grid;
+  gap: 4px;
+}
+
+.log-item__identity small {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 .log-item--interactive {

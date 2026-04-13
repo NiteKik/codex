@@ -7,14 +7,16 @@ import { nowIso } from "../utils/time.js";
 
 export class QuotaPoller extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
+  private intervalMs: number;
 
   constructor(
     private readonly db: GatewayDatabase,
     private readonly accountManager: AccountManager,
     private readonly provider: ProviderClient,
-    private readonly intervalMs: number,
+    intervalMs: number,
   ) {
     super();
+    this.intervalMs = this.normalizeIntervalMs(intervalMs);
   }
 
   start() {
@@ -27,6 +29,39 @@ export class QuotaPoller extends EventEmitter {
     }, this.intervalMs);
   }
 
+  getIntervalMs() {
+    return this.intervalMs;
+  }
+
+  setIntervalMs(nextIntervalMs: number) {
+    const normalized = this.normalizeIntervalMs(nextIntervalMs);
+    if (normalized === this.intervalMs) {
+      return;
+    }
+
+    const previous = this.intervalMs;
+    this.intervalMs = normalized;
+
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = setInterval(() => {
+        void this.runOnce("poller");
+      }, this.intervalMs);
+    }
+
+    this.db.logRuntime({
+      level: "info",
+      scope: "quota-poller",
+      event: "poll.interval_updated",
+      message: `Polling interval updated: ${previous}ms -> ${this.intervalMs}ms`,
+      detailsJson: JSON.stringify({
+        previousIntervalMs: previous,
+        nextIntervalMs: this.intervalMs,
+      }),
+      createdAt: nowIso(),
+    });
+  }
+
   stop() {
     if (this.timer) {
       clearInterval(this.timer);
@@ -36,8 +71,8 @@ export class QuotaPoller extends EventEmitter {
 
   async runOnce(source: "poller" | "manual") {
     const allAccounts = this.accountManager.listAccounts();
-    const accounts = allAccounts.filter((account) => account.status !== "invalid");
-    const skippedInvalidCount = allAccounts.length - accounts.length;
+    const accounts = allAccounts;
+    const skippedInvalidCount = 0;
     this.db.logRuntime({
       level: "info",
       scope: "quota-poller",
@@ -75,6 +110,14 @@ export class QuotaPoller extends EventEmitter {
   private async pollAccount(account: Account, source: "poller" | "manual") {
     try {
       const snapshot = await this.provider.fetchQuota(account);
+      const workspaceUpdated = this.accountManager.mergeWorkspaceHint(
+        account.id,
+        snapshot.workspaceHint,
+      );
+      const subscriptionUpdated = this.accountManager.mergeSubscriptionHint(
+        account.id,
+        snapshot.subscriptionHint,
+      );
       this.accountManager.applyQuotaSnapshot({
         ...snapshot,
         source,
@@ -92,6 +135,13 @@ export class QuotaPoller extends EventEmitter {
           window5hTotal: snapshot.window5hTotal,
           window5hUsed: snapshot.window5hUsed,
           sampleTime: snapshot.sampleTime,
+          workspaceUpdated,
+          subscriptionUpdated,
+          workspaceKind: snapshot.workspaceHint?.kind ?? null,
+          workspaceId: snapshot.workspaceHint?.id ?? null,
+          workspaceName: snapshot.workspaceHint?.name ?? null,
+          subscriptionPlanType: snapshot.subscriptionHint?.planType ?? null,
+          subscriptionStatus: snapshot.subscriptionHint?.status ?? null,
         }),
         createdAt: nowIso(),
       });
@@ -132,5 +182,14 @@ export class QuotaPoller extends EventEmitter {
       this.emit("account_polled", { accountId: account.id, ok: false, error: message });
       throw error;
     }
+  }
+
+  private normalizeIntervalMs(value: number) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return 180_000;
+    }
+
+    return Math.max(1_000, Math.floor(parsed));
   }
 }

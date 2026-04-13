@@ -1,8 +1,13 @@
 import Fastify from "fastify";
 import { AccountManager } from "./accounts/account-manager.js";
+import { GatewayTokenManager } from "./auth/gateway-token-manager.js";
 import { config } from "./config.js";
 import { GatewayDatabase } from "./db/database.js";
 import { buildSeededSnapshot, createDemoSeeds } from "./demo/demo-data.js";
+import {
+  CdkActivationService,
+  type CdkActivationResult,
+} from "./integrations/cdk-activation-service.js";
 import { ChatgptCaptureManager } from "./integrations/chatgpt-capture-manager.js";
 import { GenericHttpProvider } from "./providers/generic-http-provider.js";
 import { createMockUpstreamServer } from "./providers/mock-upstream.js";
@@ -11,9 +16,17 @@ import { QuotaPoller } from "./quota/quota-poller.js";
 import { QuotaVirtualizer } from "./quota/quota-virtualizer.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { SessionManager } from "./session/session-manager.js";
-import type { Account, AccountStatus, AuthConfig } from "./types.js";
+import type {
+  Account,
+  AccountStatus,
+  AuthConfig,
+  QuotaSnapshot,
+  WorkspaceContext,
+  WorkspaceKind,
+} from "./types.js";
 
 const accountStatuses = new Set<AccountStatus>(["healthy", "exhausted", "cooling", "invalid"]);
+const workspaceKinds = new Set<WorkspaceKind>(["personal", "team", "unknown"]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -42,6 +55,192 @@ const readOptionalString = (source: Record<string, unknown>, key: string, fallba
   return value.trim();
 };
 
+const readNullableOptionalString = (
+  source: Record<string, unknown>,
+  key: string,
+  fallback: string | null = null,
+) => {
+  const value = source[key];
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`Field "${key}" must be a string.`);
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+};
+
+const parseOptionalStringMap = (
+  value: unknown,
+  fieldPath: string,
+): Record<string, string> | null => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    throw new Error(`Field "${fieldPath}" must be an object with string values.`);
+  }
+
+  const entries = Object.entries(value).map(([key, mapValue]) => {
+    if (typeof mapValue !== "string") {
+      throw new Error(`Field "${fieldPath}.${key}" must be a string.`);
+    }
+    return [key, mapValue] as const;
+  });
+
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
+};
+
+const parseWorkspaceKind = (value: unknown, fallback: WorkspaceKind = "unknown"): WorkspaceKind => {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (workspaceKinds.has(normalized as WorkspaceKind)) {
+    return normalized as WorkspaceKind;
+  }
+
+  return fallback;
+};
+
+const normalizeWorkspaceContext = (
+  workspace: WorkspaceContext,
+  fallbackKind: WorkspaceKind = "unknown",
+): WorkspaceContext => ({
+  kind: workspaceKinds.has(workspace.kind) ? workspace.kind : fallbackKind,
+  id: workspace.id?.trim() ? workspace.id.trim() : null,
+  name: workspace.name?.trim() ? workspace.name.trim() : null,
+  headers:
+    workspace.headers && Object.keys(workspace.headers).length > 0 ? workspace.headers : null,
+});
+
+const parseWorkspacePayload = (
+  body: Record<string, unknown>,
+  existing: WorkspaceContext | null,
+): WorkspaceContext => {
+  const existingWorkspace = normalizeWorkspaceContext(
+    existing ?? {
+      kind: "unknown",
+      id: null,
+      name: null,
+      headers: null,
+    },
+  );
+
+  if (body.workspace === undefined) {
+    return existingWorkspace;
+  }
+
+  if (!isRecord(body.workspace)) {
+    throw new Error('Field "workspace" must be an object.');
+  }
+
+  const workspaceBody = body.workspace;
+  return normalizeWorkspaceContext({
+    kind: parseWorkspaceKind(workspaceBody.kind, existingWorkspace.kind),
+    id: readNullableOptionalString(workspaceBody, "id", existingWorkspace.id),
+    name: readNullableOptionalString(workspaceBody, "name", existingWorkspace.name),
+    headers:
+      workspaceBody.headers === undefined
+        ? existingWorkspace.headers
+        : parseOptionalStringMap(workspaceBody.headers, "workspace.headers"),
+  });
+};
+
+const isRecordWithRateLimit = (
+  value: unknown,
+): value is Record<string, unknown> & { rate_limit: Record<string, unknown> } =>
+  isRecord(value) && isRecord(value.rate_limit);
+
+const toNumber = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+};
+
+const toIsoFromEpochSeconds = (value: unknown) => {
+  const epochSeconds = toNumber(value);
+  if (epochSeconds === null) {
+    return null;
+  }
+
+  const date = new Date(epochSeconds * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+const parseWhamWindow = (value: unknown) => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const usedPercent = toNumber(value.used_percent);
+  if (usedPercent === null) {
+    return null;
+  }
+
+  const normalizedUsedPercent = Math.min(100, Math.max(0, usedPercent));
+  return {
+    total: 100,
+    used: normalizedUsedPercent,
+    resetAt: toIsoFromEpochSeconds(value.reset_at) ?? new Date().toISOString(),
+  };
+};
+
+const parseCapturedWhamUsage = (payload: unknown, accountId: string): QuotaSnapshot | null => {
+  if (!isRecordWithRateLimit(payload)) {
+    return null;
+  }
+  const payloadRecord = payload as Record<string, unknown> & {
+    rate_limit: Record<string, unknown>;
+  };
+
+  const primaryWindow = parseWhamWindow(payloadRecord.rate_limit["primary_window"]);
+  const secondaryWindow = parseWhamWindow(payloadRecord.rate_limit["secondary_window"]);
+  const weeklyWindow = secondaryWindow ?? primaryWindow;
+  const window5hWindow = primaryWindow ?? secondaryWindow;
+
+  if (!weeklyWindow || !window5hWindow) {
+    return null;
+  }
+
+  const planTypeRaw =
+    typeof payloadRecord.plan_type === "string"
+      ? payloadRecord.plan_type.trim().toLowerCase()
+      : "";
+  const planType = planTypeRaw.length > 0 ? planTypeRaw : null;
+  const subscriptionHint = planType
+    ? {
+        planType,
+        status: planType.includes("trial") ? ("trial" as const) : ("active" as const),
+      }
+    : undefined;
+
+  return {
+    accountId,
+    weeklyTotal: weeklyWindow.total,
+    weeklyUsed: weeklyWindow.used,
+    weeklyResetAt: weeklyWindow.resetAt,
+    window5hTotal: window5hWindow.total,
+    window5hUsed: window5hWindow.used,
+    window5hResetAt: window5hWindow.resetAt,
+    sampleTime: new Date().toISOString(),
+    source: "manual",
+    ...(subscriptionHint ? { subscriptionHint } : {}),
+  };
+};
+
 const readOptionalPositiveInt = (
   source: Record<string, unknown>,
   key: string,
@@ -59,6 +258,118 @@ const readOptionalPositiveInt = (
   }
 
   return Math.min(max, Math.max(1, Math.floor(parsed)));
+};
+
+const parseRequiredPollIntervalSeconds = (
+  source: Record<string, unknown>,
+  key: string,
+  minSeconds: number,
+  maxSeconds: number,
+) => {
+  if (!hasOwn(source, key)) {
+    throw new Error(`Field "${key}" is required.`);
+  }
+
+  const raw = source[key];
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    throw new Error(`Field "${key}" must be an integer.`);
+  }
+
+  if (parsed < minSeconds || parsed > maxSeconds) {
+    throw new Error(`Field "${key}" must be between ${minSeconds} and ${maxSeconds}.`);
+  }
+
+  return parsed;
+};
+
+const parseOptionalTtlSeconds = (source: Record<string, unknown>, key: string) => {
+  if (!hasOwn(source, key)) {
+    return null;
+  }
+
+  const raw = source[key];
+  if (raw === null || raw === undefined || raw === "") {
+    return null;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    throw new Error(`Field "${key}" must be an integer.`);
+  }
+
+  if (parsed < 0 || parsed > 10 * 365 * 24 * 3600) {
+    throw new Error(`Field "${key}" must be between 0 and 315360000.`);
+  }
+
+  return parsed === 0 ? null : parsed;
+};
+
+const parseOptionalBoolean = (
+  source: Record<string, unknown>,
+  key: string,
+  fallback = false,
+) => {
+  if (!hasOwn(source, key)) {
+    return fallback;
+  }
+
+  const value = source[key];
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+      return true;
+    }
+    if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+      return false;
+    }
+  }
+
+  return fallback;
+};
+
+const normalizePlanType = (value: string | null | undefined) =>
+  value?.trim().toLowerCase() ?? "";
+
+const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
+
+const inferPlanTypeFromProductType = (productType: string) => {
+  const normalized = productType.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.includes("plus")) {
+    return "plus";
+  }
+  if (normalized.includes("pro")) {
+    return "pro";
+  }
+  if (normalized.includes("team")) {
+    return "team";
+  }
+  if (normalized.includes("enterprise")) {
+    return "enterprise";
+  }
+
+  return null;
+};
+
+const accountSessionInfoSettingKey = (accountId: string) => `account_session_info:${accountId}`;
+
+const buildManagedTokenDefaultName = () => {
+  const timestamp = new Date()
+    .toISOString()
+    .replaceAll("-", "")
+    .replaceAll(":", "")
+    .replace(/\..+$/, "");
+  return `token-${timestamp}`;
 };
 
 const makeAccountIdFromEmail = (email: string) =>
@@ -126,6 +437,59 @@ const sanitizeAuthForAdmin = (auth: AuthConfig): AuthConfig => {
   };
 };
 
+const normalizePathname = (url: string) => {
+  const queryIndex = url.indexOf("?");
+  return queryIndex >= 0 ? url.slice(0, queryIndex) : url;
+};
+
+const isGatewayProtectedPath = (url: string) => {
+  const pathname = normalizePathname(url);
+  return (
+    pathname.startsWith("/proxy/") ||
+    pathname.startsWith("/v1/") ||
+    pathname.startsWith("/backend-api/") ||
+    pathname === "/responses" ||
+    pathname.startsWith("/responses/")
+  );
+};
+
+const isVirtualWhamUsagePath = (url: string) => normalizePathname(url) === "/backend-api/wham/usage";
+
+const readStringHeader = (value: unknown) => {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (Array.isArray(value) && value.length > 0 && typeof value[0] === "string") {
+    return value[0].trim();
+  }
+
+  return "";
+};
+
+const extractBearerToken = (authorizationValue: string) => {
+  if (!authorizationValue) {
+    return null;
+  }
+
+  const [scheme, token] = authorizationValue.split(/\s+/, 2);
+  if (!scheme || !token) {
+    return null;
+  }
+
+  return scheme.toLowerCase() === "bearer" ? token.trim() : null;
+};
+
+const resolveGatewayTokenFromHeaders = (headers: Record<string, unknown>) => {
+  const bearerToken = extractBearerToken(readStringHeader(headers.authorization));
+  if (bearerToken) {
+    return bearerToken;
+  }
+
+  const directToken = readStringHeader(headers["x-gateway-token"]);
+  return directToken.length > 0 ? directToken : null;
+};
+
 const parseAccountPayload = (
   body: unknown,
   defaults: {
@@ -145,6 +509,7 @@ const parseAccountPayload = (
   | "quotaPath"
   | "proxyPathPrefix"
   | "auth"
+  | "workspace"
   | "status"
 > => {
   if (!isRecord(body)) {
@@ -164,6 +529,7 @@ const parseAccountPayload = (
   if (!auth) {
     throw new Error('Field "auth" is required.');
   }
+  const workspace = parseWorkspacePayload(body, existing?.workspace ?? null);
 
   return {
     id: readRequiredString(body, "id"),
@@ -181,13 +547,17 @@ const parseAccountPayload = (
       existing?.proxyPathPrefix ?? defaults.proxyPathPrefix,
     ),
     auth,
+    workspace,
     status,
   };
 };
 
 export const createGatewayRuntime = () => {
+  const pollIntervalMinSeconds = 5;
+  const pollIntervalMaxSeconds = 3600;
   const db = new GatewayDatabase(config.dbFile);
   db.init();
+  const tokenManager = new GatewayTokenManager(db, config.gatewayAccessToken);
 
   const accountManager = new AccountManager(db, config.cooldownMs);
   const provider = new GenericHttpProvider();
@@ -201,9 +571,20 @@ export const createGatewayRuntime = () => {
     config.maxConcurrentPerAccount,
     config.stickyMinWindowRatio,
     config.stickyMinWeeklyRatio,
+    config.preemptiveWeeklyReserveRatio,
+    config.preemptiveWindowReserveRatio,
+    config.preemptiveWeeklyReserveUnits,
+    config.preemptiveWindowReserveUnits,
   );
-  const poller = new QuotaPoller(db, accountManager, provider, config.pollIntervalMs);
+  const configuredPollIntervalMs = db.getPollIntervalMs() ?? config.pollIntervalMs;
+  const poller = new QuotaPoller(db, accountManager, provider, configuredPollIntervalMs);
   const chatgptCaptureManager = new ChatgptCaptureManager(config.browserProfileDir);
+  const cdkActivationService = new CdkActivationService({
+    cdkFilePath: config.cdkFilePath,
+    activationBaseUrl: config.cdkActivationBaseUrl,
+    requestTimeoutMs: config.cdkActivationTimeoutMs,
+    defaultProductType: config.defaultCdkProductType,
+  });
   const proxyService = new ProxyService(
     db,
     provider,
@@ -240,25 +621,238 @@ export const createGatewayRuntime = () => {
     bodyLimit: 10 * 1024 * 1024,
   });
 
-  app.addHook("onRequest", async (request, reply) => {
+  app.addHook("onRequest", (request, reply, done) => {
     reply.header("Access-Control-Allow-Origin", "*");
-    reply.header("Access-Control-Allow-Headers", "content-type,x-session-id,x-codex-session");
+    reply.header(
+      "Access-Control-Allow-Headers",
+      "content-type,x-session-id,x-codex-session,authorization,x-gateway-token",
+    );
     reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     reply.header(
       "Access-Control-Expose-Headers",
-      "x-session-id,x-routed-account-id,x-routing-reason",
+      "x-session-id,x-routed-account-id,x-routing-reason,x-quota-source",
     );
 
     if (request.method === "OPTIONS") {
-      return reply.status(204).send();
+      reply.status(204).send();
+      return;
     }
+
+    if (
+      request.method === "GET" &&
+      config.exposeVirtualWhamUsage &&
+      isVirtualWhamUsagePath(request.url)
+    ) {
+      done();
+      return;
+    }
+
+    if (!config.requireGatewayAccessToken || !isGatewayProtectedPath(request.url)) {
+      done();
+      return;
+    }
+
+    const inboundToken = resolveGatewayTokenFromHeaders(
+      request.headers as unknown as Record<string, unknown>,
+    );
+    if (tokenManager.verifyToken(inboundToken)) {
+      done();
+      return;
+    }
+
+    reply.header("www-authenticate", 'Bearer realm="quota-gateway"');
+    reply.status(401).send({
+      error: "gateway_auth_required",
+      message: "Missing or invalid gateway access token.",
+    });
   });
 
   app.get("/healthz", async () => ({
     ok: true,
     service: "quota-gateway",
-    pollIntervalMs: config.pollIntervalMs,
+    pollIntervalMs: poller.getIntervalMs(),
   }));
+
+  app.get("/admin/settings", async () => {
+    const intervalMs = poller.getIntervalMs();
+    return {
+      ok: true,
+      pollIntervalMs: intervalMs,
+      pollIntervalSeconds: Math.floor(intervalMs / 1000),
+      pollIntervalRange: {
+        minSeconds: pollIntervalMinSeconds,
+        maxSeconds: pollIntervalMaxSeconds,
+      },
+    };
+  });
+
+  app.put("/admin/settings", async (request, reply) => {
+    try {
+      const body = isRecord(request.body) ? request.body : {};
+      const pollIntervalSeconds = parseRequiredPollIntervalSeconds(
+        body,
+        "pollIntervalSeconds",
+        pollIntervalMinSeconds,
+        pollIntervalMaxSeconds,
+      );
+      const pollIntervalMs = pollIntervalSeconds * 1000;
+      db.setPollIntervalMs(pollIntervalMs);
+      poller.setIntervalMs(pollIntervalMs);
+
+      return {
+        ok: true,
+        pollIntervalMs,
+        pollIntervalSeconds,
+      };
+    } catch (error) {
+      return reply.status(400).send({
+        error: "invalid_settings_payload",
+        message: error instanceof Error ? error.message : "Invalid settings payload.",
+      });
+    }
+  });
+
+  app.get("/admin/access-token", async () => {
+    const baseUrl = `http://127.0.0.1:${config.gatewayPort}`;
+    const envVarName = "QUOTA_GATEWAY_TOKEN";
+    const codexConfigSnippet = [
+      'model_provider = "quota_gateway"',
+      "",
+      "[model_providers.quota_gateway]",
+      'name = "Local Quota Gateway"',
+      `base_url = "${baseUrl}"`,
+      `env_key = "${envVarName}"`,
+      "",
+      "# 可选：如协议不匹配再启用",
+      '# wire_api = "responses"',
+    ].join("\n");
+    const openaiBaseUrlSnippet = [
+      `openai_base_url = "${baseUrl}"`,
+      'forced_login_method = "chatgpt"',
+      "",
+      '# 为了保留原有历史会话，请保持默认 model_provider = "openai"',
+      '# 该方案下不要设置 model_provider = "quota_gateway"',
+    ].join("\n");
+
+    return {
+      ok: true,
+      required: config.requireGatewayAccessToken,
+      token: config.gatewayAccessToken,
+      tokenPreview: GatewayTokenManager.buildTokenPreview(config.gatewayAccessToken),
+      source: config.gatewayAccessTokenSource,
+      tokenFilePath: config.gatewayAccessTokenFilePath,
+      authHeader: `Bearer ${config.gatewayAccessToken}`,
+      managedTokensEndpoint: "/admin/tokens",
+      codexEnvVar: envVarName,
+      windowsSetxCommand: `setx ${envVarName} "${config.gatewayAccessToken}"`,
+      windowsSessionCommand: `$env:${envVarName} = "${config.gatewayAccessToken}"`,
+      codexBaseUrl: baseUrl,
+      codexConfigSnippet,
+      providerConfigSnippet: codexConfigSnippet,
+      openaiBaseUrlConfigSnippet: openaiBaseUrlSnippet,
+      openaiBaseUrlCompatible: !config.requireGatewayAccessToken,
+      strategyDiff: {
+        providerMode: "需要通过 env_key 提供 token；会切换到自定义 provider 命名空间。",
+        openaiBaseUrlMode:
+          "保持内置 openai provider 的命名空间与历史会话。要求网关关闭 token 强校验（REQUIRE_GATEWAY_ACCESS_TOKEN=0）。",
+      },
+    };
+  });
+
+  app.get("/admin/tokens", async () => {
+    return {
+      ok: true,
+      required: config.requireGatewayAccessToken,
+      primaryToken: {
+        token: config.gatewayAccessToken,
+        tokenPreview: GatewayTokenManager.buildTokenPreview(config.gatewayAccessToken),
+        source: config.gatewayAccessTokenSource,
+        tokenFilePath: config.gatewayAccessTokenFilePath,
+      },
+      tokens: tokenManager.listManagedTokens(),
+    };
+  });
+
+  app.post("/admin/tokens", async (request, reply) => {
+    try {
+      const body = isRecord(request.body) ? request.body : {};
+      const requestedName = readOptionalString(body, "name", "");
+      const name = requestedName.length > 0 ? requestedName : buildManagedTokenDefaultName();
+      const ttlSeconds = parseOptionalTtlSeconds(body, "ttlSeconds");
+      const created = tokenManager.createManagedToken({
+        name,
+        ttlSeconds,
+      });
+
+      return reply.status(201).send({
+        ok: true,
+        token: created.token,
+        authHeader: `Bearer ${created.token}`,
+        item: created.item,
+      });
+    } catch (error) {
+      return reply.status(400).send({
+        error: "invalid_token_payload",
+        message: error instanceof Error ? error.message : "Invalid token payload.",
+      });
+    }
+  });
+
+  app.patch("/admin/tokens/:tokenId", async (request, reply) => {
+    const tokenId = (request.params as { tokenId: string }).tokenId;
+
+    try {
+      const body = isRecord(request.body) ? request.body : {};
+      if (!hasOwn(body, "ttlSeconds")) {
+        return reply.status(400).send({
+          error: "invalid_token_payload",
+          message: 'Field "ttlSeconds" is required.',
+        });
+      }
+
+      const ttlSeconds = parseOptionalTtlSeconds(body, "ttlSeconds");
+      const updated = tokenManager.updateManagedTokenTtl(tokenId, ttlSeconds);
+      if (!updated) {
+        return reply.status(404).send({
+          error: "token_not_found",
+          message: `Token ${tokenId} does not exist.`,
+        });
+      }
+
+      if (updated === "revoked") {
+        return reply.status(409).send({
+          error: "token_revoked",
+          message: "Cannot update TTL for a revoked token.",
+        });
+      }
+
+      return {
+        ok: true,
+        item: updated,
+      };
+    } catch (error) {
+      return reply.status(400).send({
+        error: "invalid_token_payload",
+        message: error instanceof Error ? error.message : "Invalid token payload.",
+      });
+    }
+  });
+
+  app.delete("/admin/tokens/:tokenId", async (request, reply) => {
+    const tokenId = (request.params as { tokenId: string }).tokenId;
+    const revoked = tokenManager.revokeManagedToken(tokenId);
+    if (!revoked) {
+      return reply.status(404).send({
+        error: "token_not_found",
+        message: `Token ${tokenId} does not exist.`,
+      });
+    }
+
+    return {
+      ok: true,
+      item: revoked,
+    };
+  });
 
   app.get("/admin/accounts", async () => {
     return accountManager.listAccounts().map((account) => serializeAccount(account.id));
@@ -266,8 +860,9 @@ export const createGatewayRuntime = () => {
 
   app.post("/admin/accounts", async (request, reply) => {
     try {
+      const body = isRecord(request.body) ? request.body : {};
       const payload = parseAccountPayload(
-        request.body,
+        body,
         {
           provider: config.defaultAccountProvider,
           upstreamBaseUrl: config.defaultUpstreamBaseUrl,
@@ -286,6 +881,10 @@ export const createGatewayRuntime = () => {
 
       accountManager.upsertAccount({
         ...payload,
+        subscription: {
+          planType: null,
+          status: "unknown",
+        },
         successCount: 0,
         failureCount: 0,
         consecutiveFailures: 0,
@@ -294,6 +893,13 @@ export const createGatewayRuntime = () => {
         lastErrorCode: null,
         lastErrorMessage: null,
       });
+
+      const sessionInfoFromBody =
+        readNullableOptionalString(body, "sessionInfo", null) ??
+        readNullableOptionalString(body, "session_info", null);
+      if (sessionInfoFromBody) {
+        db.setRuntimeSetting(accountSessionInfoSettingKey(payload.id), sessionInfoFromBody);
+      }
 
       return reply.status(201).send({
         ok: true,
@@ -397,6 +1003,7 @@ export const createGatewayRuntime = () => {
         makeAccountIdFromEmail(captureResult.email),
       );
       const accountName = readOptionalString(body, "name", captureResult.email);
+      const workspace = parseWorkspacePayload(body, captureResult.workspace);
 
       const existing = accountManager.getAccount(requestedAccountId);
       const providerName = readOptionalString(
@@ -431,6 +1038,12 @@ export const createGatewayRuntime = () => {
           mode: "bearer",
           token: captureResult.accessToken,
         },
+        workspace,
+        subscription:
+          existing?.subscription ?? {
+            planType: null,
+            status: "unknown",
+          },
         status: "healthy",
         successCount: existing?.successCount ?? 0,
         failureCount: existing?.failureCount ?? 0,
@@ -441,14 +1054,37 @@ export const createGatewayRuntime = () => {
         lastErrorMessage: null,
       });
 
+      db.setRuntimeSetting(
+        accountSessionInfoSettingKey(requestedAccountId),
+        JSON.stringify(captureResult.sessionPayload),
+      );
+
       try {
-        const account = accountManager.getAccount(requestedAccountId);
-        if (account) {
-          const snapshot = await provider.fetchQuota(account);
-          accountManager.applyQuotaSnapshot({
-            ...snapshot,
-            source: "manual",
-          });
+        const capturedSnapshot = parseCapturedWhamUsage(
+          captureResult.usagePayload,
+          requestedAccountId,
+        );
+
+        if (capturedSnapshot) {
+          accountManager.mergeSubscriptionHint(
+            requestedAccountId,
+            capturedSnapshot.subscriptionHint,
+          );
+          accountManager.applyQuotaSnapshot(capturedSnapshot);
+        } else {
+          const account = accountManager.getAccount(requestedAccountId);
+          if (account) {
+            const snapshot = await provider.fetchQuota(account);
+            accountManager.mergeWorkspaceHint(requestedAccountId, snapshot.workspaceHint);
+            accountManager.mergeSubscriptionHint(
+              requestedAccountId,
+              snapshot.subscriptionHint,
+            );
+            accountManager.applyQuotaSnapshot({
+              ...snapshot,
+              source: "manual",
+            });
+          }
         }
       } catch (error) {
         db.logRuntime({
@@ -474,6 +1110,9 @@ export const createGatewayRuntime = () => {
           taskId,
           email: captureResult.email,
           profileKey: captureResult.profileKey,
+          workspaceKind: workspace.kind,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
         }),
         createdAt: new Date().toISOString(),
       });
@@ -537,6 +1176,10 @@ export const createGatewayRuntime = () => {
         lastErrorMessage: authChanged ? null : existing.lastErrorMessage,
       });
 
+      if (authChanged) {
+        db.deleteRuntimeSetting(accountSessionInfoSettingKey(accountId));
+      }
+
       return reply.send({
         ok: true,
         account: serializeAccount(accountId),
@@ -545,6 +1188,124 @@ export const createGatewayRuntime = () => {
       return reply.status(400).send({
         error: "invalid_account_payload",
         message: error instanceof Error ? error.message : "Unknown payload error.",
+      });
+    }
+  });
+
+  app.get("/admin/cdks/options", async () => {
+    const options = await cdkActivationService.listAvailableProductInventories();
+    return {
+      options,
+      defaultProductType: config.defaultCdkProductType,
+    };
+  });
+
+  app.post("/admin/accounts/:accountId/upgrade", async (request, reply) => {
+    const accountId = (request.params as { accountId: string }).accountId;
+    const existing = accountManager.getAccount(accountId);
+
+    if (!existing) {
+      return reply.status(404).send({
+        error: "account_not_found",
+        message: `Account ${accountId} does not exist.`,
+      });
+    }
+
+    try {
+      const body = isRecord(request.body) ? request.body : {};
+      const requestedProductType = readOptionalString(body, "productType", "");
+      const productType = requestedProductType || config.defaultCdkProductType;
+      const specifiedCdkey = readOptionalString(body, "cdkey", "");
+      const force = parseOptionalBoolean(body, "force", false);
+      const sessionInfoFromBody =
+        readNullableOptionalString(body, "sessionInfo", null) ??
+        readNullableOptionalString(body, "session_info", null);
+      const savedSessionInfo = db.getRuntimeSetting(accountSessionInfoSettingKey(accountId));
+      const sessionInfo = sessionInfoFromBody ?? savedSessionInfo;
+
+      if (sessionInfoFromBody) {
+        db.setRuntimeSetting(accountSessionInfoSettingKey(accountId), sessionInfoFromBody);
+      }
+
+      if (!isFreePlanType(existing.subscription.planType) && !force) {
+        const currentPlanType = normalizePlanType(existing.subscription.planType) || "unknown";
+        return reply.status(409).send({
+          error: "account_not_free_plan",
+          message: `该账号当前 plan 为 ${currentPlanType}，仅允许免费账号升级。`,
+        });
+      }
+
+      let activation: CdkActivationResult;
+      if (specifiedCdkey) {
+        activation = await cdkActivationService.activateWithSpecifiedCdk({
+          account: existing,
+          cdkey: specifiedCdkey,
+          productType: requestedProductType || undefined,
+          sessionInfo,
+          force,
+        });
+      } else {
+        const availableCount = await cdkActivationService.countAvailableCdks(productType);
+        if (availableCount <= 0) {
+          return reply.status(409).send({
+            error: "cdk_out_of_stock",
+            message: `当前暂无可用 ${productType} CDK。`,
+          });
+        }
+
+        activation = await cdkActivationService.activateWithAvailableCdk({
+          account: existing,
+          productType,
+          sessionInfo,
+          force,
+        });
+      }
+
+      const inferredPlanType = inferPlanTypeFromProductType(activation.productType);
+      if (inferredPlanType) {
+        accountManager.mergeSubscriptionHint(accountId, {
+          planType: inferredPlanType,
+          status: "active",
+        });
+      }
+
+      const remainingCdks = await cdkActivationService.countAvailableCdks(activation.productType);
+
+      db.logRuntime({
+        level: "info",
+        scope: "cdk-activation",
+        event: "activation.completed",
+        message: "Account upgraded via CDK activation flow",
+        accountId,
+        detailsJson: JSON.stringify({
+          productType: activation.productType,
+          cdkeyPreview: activation.cdkeyPreview,
+          remainingCdks,
+        }),
+        createdAt: new Date().toISOString(),
+      });
+
+      return {
+        ok: true,
+        account: serializeAccount(accountId),
+        activation: {
+          ...activation,
+          remainingCdks,
+        },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "账号升级失败。";
+      db.logRuntime({
+        level: "warn",
+        scope: "cdk-activation",
+        event: "activation.failed",
+        message,
+        accountId,
+        createdAt: new Date().toISOString(),
+      });
+      return reply.status(400).send({
+        error: "account_upgrade_failed",
+        message,
       });
     }
   });
@@ -561,6 +1322,7 @@ export const createGatewayRuntime = () => {
     }
 
     db.deleteAccountWithRelatedData(accountId);
+    db.deleteRuntimeSetting(accountSessionInfoSettingKey(accountId));
     return reply.send({
       ok: true,
     });
@@ -620,6 +1382,25 @@ export const createGatewayRuntime = () => {
     return {
       ok: true,
     };
+  });
+
+  app.get("/backend-api/wham/usage", async (request, reply) => {
+    if (!config.exposeVirtualWhamUsage) {
+      return proxyService.handleResolvedPath(request, reply, "/backend-api/wham/usage");
+    }
+
+    reply.header("cache-control", "no-store");
+    reply.header("x-quota-source", "virtual-pool");
+    return quotaVirtualizer.getVirtualWhamUsage({ includeInvalid: false });
+  });
+
+  // OpenAI Responses-compatible aliases (for clients that use base_url + /responses)
+  app.all("/responses", async (request, reply) =>
+    proxyService.handleResolvedPath(request, reply, "/responses"),
+  );
+  app.all("/responses/*", async (request, reply) => {
+    const wildcard = (request.params as Record<string, string>)["*"];
+    return proxyService.handleResolvedPath(request, reply, `/responses/${wildcard}`);
   });
 
   app.all("/proxy/*", async (request, reply) => proxyService.handle(request, reply));

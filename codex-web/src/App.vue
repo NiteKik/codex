@@ -3,6 +3,7 @@ import AccountsPage from "./pages/accounts-page.vue";
 import DashboardPage from "./pages/dashboard-page.vue";
 import PlusPage from "./pages/plus-page.vue";
 import SettingsPage from "./pages/settings-page.vue";
+import TokensPage from "./pages/tokens-page.vue";
 
 const currentPath = window.location.pathname;
 
@@ -10,6 +11,7 @@ const pageTitleMap: Record<string, string> = {
   "/": "Plus 自助页",
   "/accounts": "账号管理",
   "/dashboard": "仪表盘",
+  "/tokens": "Token 管理",
   "/settings": "设置",
 };
 
@@ -17,6 +19,7 @@ const currentPageMap = {
   "/": PlusPage,
   "/accounts": AccountsPage,
   "/dashboard": DashboardPage,
+  "/tokens": TokensPage,
   "/settings": SettingsPage,
 };
 
@@ -38,6 +41,9 @@ const CurrentPage = currentPageMap[currentPath as keyof typeof currentPageMap] ?
         </a>
         <a href="/dashboard" class="topbar__link" :class="{ 'is-active': currentPath === '/dashboard' }">
           仪表盘
+        </a>
+        <a href="/tokens" class="topbar__link" :class="{ 'is-active': currentPath === '/tokens' }">
+          Token 管理
         </a>
         <a href="/settings" class="topbar__link" :class="{ 'is-active': currentPath === '/settings' }">
           设置

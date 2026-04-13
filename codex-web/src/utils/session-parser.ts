@@ -1,4 +1,33 @@
+import type { WorkspaceContext, WorkspaceKind } from "../services/gateway-api.ts";
+
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const pickRecordByPath = (payload: unknown, path: string[]) => {
+  let cursor: unknown = payload;
+  for (const key of path) {
+    if (!isRecord(cursor)) {
+      return null;
+    }
+    cursor = cursor[key];
+  }
+
+  return isRecord(cursor) ? cursor : null;
+};
+
+const pickStringByPath = (payload: unknown, path: string[]) => {
+  let cursor: unknown = payload;
+  for (const key of path) {
+    if (!isRecord(cursor)) {
+      return null;
+    }
+    cursor = cursor[key];
+  }
+
+  return typeof cursor === "string" && cursor.trim().length > 0 ? cursor.trim() : null;
+};
 
 const findStringByKeys = (
   value: unknown,
@@ -46,6 +75,89 @@ const findStringByKeys = (
   return null;
 };
 
+const toWorkspaceKind = (value: string | null): WorkspaceKind => {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  if (!normalized) {
+    return "unknown";
+  }
+  if (
+    normalized.includes("team") ||
+    normalized.includes("business") ||
+    normalized.includes("enterprise") ||
+    normalized.includes("org")
+  ) {
+    return "team";
+  }
+  if (
+    normalized.includes("personal") ||
+    normalized.includes("individual") ||
+    normalized.includes("free") ||
+    normalized.includes("plus") ||
+    normalized.includes("pro")
+  ) {
+    return "personal";
+  }
+
+  return "unknown";
+};
+
+const extractWorkspaceContext = (payload: unknown): WorkspaceContext => {
+  const directWorkspace =
+    pickRecordByPath(payload, ["workspace"]) ??
+    pickRecordByPath(payload, ["active_workspace"]) ??
+    pickRecordByPath(payload, ["current_workspace"]) ??
+    pickRecordByPath(payload, ["selected_workspace"]) ??
+    pickRecordByPath(payload, ["account"]) ??
+    pickRecordByPath(payload, ["active_account"]) ??
+    pickRecordByPath(payload, ["organization"]) ??
+    pickRecordByPath(payload, ["active_organization"]);
+
+  const id =
+    pickStringByPath(payload, ["active_workspace_id"]) ??
+    pickStringByPath(payload, ["workspace_id"]) ??
+    pickStringByPath(payload, ["default_workspace_id"]) ??
+    pickStringByPath(payload, ["active_account_id"]) ??
+    pickStringByPath(payload, ["account_id"]) ??
+    pickStringByPath(payload, ["organization_id"]) ??
+    (directWorkspace
+      ? pickStringByPath(directWorkspace, ["id"]) ??
+        pickStringByPath(directWorkspace, ["workspace_id"]) ??
+        pickStringByPath(directWorkspace, ["account_id"]) ??
+        pickStringByPath(directWorkspace, ["organization_id"])
+      : null);
+
+  const name =
+    (directWorkspace
+      ? pickStringByPath(directWorkspace, ["name"]) ??
+        pickStringByPath(directWorkspace, ["display_name"]) ??
+        pickStringByPath(directWorkspace, ["workspace_name"]) ??
+        pickStringByPath(directWorkspace, ["title"])
+      : null) ??
+    pickStringByPath(payload, ["workspace_name"]) ??
+    pickStringByPath(payload, ["account_name"]) ??
+    pickStringByPath(payload, ["organization_name"]);
+
+  const kindHint =
+    (directWorkspace
+      ? pickStringByPath(directWorkspace, ["type"]) ??
+        pickStringByPath(directWorkspace, ["workspace_type"]) ??
+        pickStringByPath(directWorkspace, ["plan_type"])
+      : null) ??
+    pickStringByPath(payload, ["workspace_type"]) ??
+    pickStringByPath(payload, ["account_type"]) ??
+    pickStringByPath(payload, ["organization_type"]) ??
+    pickStringByPath(payload, ["plan_type"]) ??
+    pickStringByPath(payload, ["user", "plan_type"]) ??
+    name;
+
+  return {
+    kind: toWorkspaceKind(kindHint),
+    id,
+    name,
+    headers: null,
+  };
+};
+
 export type SessionParseResult =
   | {
       ok: true;
@@ -61,6 +173,7 @@ export type SessionAuthParseResult =
       ok: true;
       email: string;
       accessToken: string;
+      workspace: WorkspaceContext;
     }
   | {
       ok: false;
@@ -155,6 +268,7 @@ export function parseSessionAuthPayload(
       ok: true,
       email,
       accessToken,
+      workspace: extractWorkspaceContext(parsedPayload),
     };
   } catch {
     return {

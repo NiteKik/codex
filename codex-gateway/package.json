@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --watch src/index.ts",
+    "dev": "bun src/index.ts",
     "build": "bunx tsc -p tsconfig.json",
     "start": "bun run build && bun dist/index.js",
-    "typecheck": "bunx tsc -p tsconfig.json --noEmit"
+    "typecheck": "bunx tsc -p tsconfig.json --noEmit",
+    "print-token": "bun run scripts/print-access-token.ts"
   },
   "dependencies": {
     "fastify": "^5.8.4",

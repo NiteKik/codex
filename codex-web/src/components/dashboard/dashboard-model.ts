@@ -63,15 +63,31 @@ export interface ScoreBreakdown {
   recentErrorPenalty: number;
   switchingCost: number;
   stickyBonus: number;
+  preemptiveEligible?: boolean;
+  weeklyReserveUnits?: number;
+  windowReserveUnits?: number;
+  weeklyRemainingAfterRequest?: number;
+  windowRemainingAfterRequest?: number;
+  weeklyResetInMs?: number | null;
+  windowResetInMs?: number | null;
 }
 
 export const dashboardRefreshIntervalMs = 30_000;
-export const defaultCollectIntervalMs = 180_000;
+export const defaultCollectIntervalMs = 30_000;
 
 const reasonLabelMap: Record<string, string> = {
   "sticky-session": "会话粘滞",
   "best-score": "最高得分",
+  "best-score-preemptive": "最高得分（保留提前量）",
+  "best-score-reserve-relaxed": "最高得分（提前量放宽）",
+  "reset-priority-preemptive": "重置优先（周→5小时，保留提前量）",
+  "reset-priority-reserve-relaxed": "重置优先（周→5小时，提前量放宽）",
 };
+
+const toComparableResetMs = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, value)
+    : Number.POSITIVE_INFINITY;
 
 export const formatDashboardNumber = (value: number) =>
   new Intl.NumberFormat("zh-CN").format(value);
@@ -145,7 +161,21 @@ export const parseDashboardScoreBreakdown = (raw: string): ScoreBreakdown[] => {
           typeof candidate.stickyBonus === "number"
         );
       })
-      .sort((left, right) => right.total - left.total);
+      .sort((left, right) => {
+        const weeklyDiff =
+          toComparableResetMs(left.weeklyResetInMs) - toComparableResetMs(right.weeklyResetInMs);
+        if (weeklyDiff !== 0) {
+          return weeklyDiff;
+        }
+
+        const windowDiff =
+          toComparableResetMs(left.windowResetInMs) - toComparableResetMs(right.windowResetInMs);
+        if (windowDiff !== 0) {
+          return windowDiff;
+        }
+
+        return right.total - left.total;
+      });
   } catch {
     return [];
   }

@@ -1,11 +1,36 @@
 export type AccountStatus = "healthy" | "exhausted" | "cooling" | "invalid";
 
 export type AuthMode = "bearer" | "static-headers";
+export type WorkspaceKind = "personal" | "team" | "unknown";
+export type SubscriptionStatus = "active" | "trial" | "inactive" | "unknown";
 
 export interface AuthConfig {
   mode: AuthMode;
   token?: string;
   headers?: Record<string, string>;
+}
+
+export interface WorkspaceContext {
+  kind: WorkspaceKind;
+  id: string | null;
+  name: string | null;
+  headers: Record<string, string> | null;
+}
+
+export interface SubscriptionContext {
+  planType: string | null;
+  status: SubscriptionStatus;
+}
+
+export interface GatewayManagedToken {
+  id: string;
+  name: string;
+  tokenHash: string;
+  tokenPreview: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
 }
 
 export interface Account {
@@ -16,6 +41,8 @@ export interface Account {
   quotaPath: string;
   proxyPathPrefix: string;
   auth: AuthConfig;
+  workspace: WorkspaceContext;
+  subscription: SubscriptionContext;
   status: AccountStatus;
   successCount: number;
   failureCount: number;
@@ -38,6 +65,8 @@ export interface QuotaSnapshot {
   window5hResetAt: string;
   sampleTime: string;
   source: "poller" | "manual";
+  workspaceHint?: WorkspaceContext;
+  subscriptionHint?: SubscriptionContext;
 }
 
 export interface QuotaState {
@@ -134,6 +163,13 @@ export interface ScoreBreakdown {
   recentErrorPenalty: number;
   switchingCost: number;
   stickyBonus: number;
+  preemptiveEligible: boolean;
+  weeklyReserveUnits: number;
+  windowReserveUnits: number;
+  weeklyRemainingAfterRequest: number;
+  windowRemainingAfterRequest: number;
+  weeklyResetInMs: number | null;
+  windowResetInMs: number | null;
 }
 
 export interface ScheduleInput {
