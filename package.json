@@ -1,0 +1,21 @@
+{
+  "name": "codex-workspace",
+  "private": true,
+  "workspaces": [
+    "codex-web",
+    "codex-gateway"
+  ],
+  "scripts": {
+    "install:all": "bun install",
+    "dev": "bun run --workspaces --parallel dev",
+    "dev:web": "bun run --cwd ./codex-web dev",
+    "dev:gateway": "bun run --cwd ./codex-gateway dev",
+    "build:web": "bun run --cwd ./codex-web build",
+    "build:gateway": "bun run --cwd ./codex-gateway build",
+    "build": "bun run build:gateway && bun run build:web",
+    "typecheck": "bun run --cwd ./codex-gateway typecheck && bun run --cwd ./codex-web typecheck",
+    "start:gateway": "bun run --cwd ./codex-gateway start",
+    "preview:web": "bun run --cwd ./codex-web preview"
+  },
+  "packageManager": "bun@1.3.11"
+}

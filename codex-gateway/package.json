@@ -1,0 +1,24 @@
+{
+  "name": "quota-gateway-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "bunx tsc -p tsconfig.json",
+    "start": "bun run build && bun dist/index.js",
+    "typecheck": "bunx tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^5.8.4",
+    "playwright-core": "^1.59.1",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/ws": "^8.18.1",
+    "bun-types": "^1.3.2",
+    "typescript": "^6.0.2"
+  },
+  "packageManager": "bun@1.3.11"
+}
