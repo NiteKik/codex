@@ -1,7 +1,16 @@
+import { getStoredGatewayBaseUrl } from "../utils/gateway-base-url.ts";
+import { requestJson } from "./http-client.ts";
+
 export type AccountStatus = "healthy" | "exhausted" | "cooling" | "invalid";
 export type AuthMode = "bearer" | "static-headers";
 export type WorkspaceKind = "personal" | "team" | "unknown";
 export type SubscriptionStatus = "active" | "trial" | "inactive" | "unknown";
+export type AccountProvisionSource =
+  | "manual"
+  | "session-import"
+  | "browser-capture"
+  | "auto-register";
+export type AccountProvisionState = "idle" | "running" | "ready" | "failed";
 
 export interface AuthConfig {
   mode: AuthMode;
@@ -44,6 +53,14 @@ export interface AccountRow {
   upstreamBaseUrl: string;
   quotaPath: string;
   proxyPathPrefix: string;
+  loginEmail: string | null;
+  managedByGateway: boolean;
+  provisionSource: AccountProvisionSource;
+  provisionState: AccountProvisionState;
+  lastProvisionAttemptAt: string | null;
+  lastProvisionedAt: string | null;
+  lastProvisionError: string | null;
+  hasStoredPassword: boolean;
   auth: AuthConfig;
   workspace: WorkspaceContext;
   subscription: SubscriptionContext;
@@ -60,6 +77,10 @@ export interface CreateAccountPayload {
   upstreamBaseUrl?: string;
   quotaPath?: string;
   proxyPathPrefix?: string;
+  loginEmail?: string | null;
+  loginPassword?: string | null;
+  managedByGateway?: boolean;
+  provisionSource?: AccountProvisionSource;
   workspace?: WorkspaceContext;
   sessionInfo?: string | null;
   session_info?: string | null;
@@ -74,6 +95,10 @@ export interface UpdateAccountPayload {
   upstreamBaseUrl?: string;
   quotaPath?: string;
   proxyPathPrefix?: string;
+  loginEmail?: string | null;
+  loginPassword?: string | null;
+  managedByGateway?: boolean;
+  provisionSource?: AccountProvisionSource;
   workspace?: WorkspaceContext;
 }
 
@@ -93,6 +118,29 @@ export interface ChatgptCaptureTask {
         hasUsagePayload: boolean;
         capturedAt: string;
         profileKey: string;
+      }
+    | null;
+}
+
+export interface ChatgptRegistrationTask {
+  id: string;
+  trigger: "manual" | "threshold";
+  state: "running" | "completed" | "failed";
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  progressMessage: string;
+  progressHistory: Array<{
+    message: string;
+    at: string;
+  }>;
+  errorMessage: string | null;
+  result:
+    | {
+        email: string;
+        accountId: string;
+        workspace: WorkspaceContext;
+        capturedAt: string;
       }
     | null;
 }
@@ -148,23 +196,11 @@ export interface CdkOptionsResponse {
   defaultProductType: string;
 }
 
-const gatewayBaseUrl = "/gateway-api";
-
-export const requestGateway = async <T>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(`${gatewayBaseUrl}${path}`, init);
-  const rawText = await response.text();
-  const payload = rawText ? (JSON.parse(rawText) as unknown) : null;
-
-  if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && "message" in payload
-        ? String((payload as { message: unknown }).message)
-        : `${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
-
-  return payload as T;
-};
+export const requestGateway = <T>(
+  path: string,
+  init?: RequestInit,
+  baseUrl = getStoredGatewayBaseUrl(),
+) => requestJson<T>(baseUrl, path, init);
 
 export const fetchHealth = () => requestGateway<{ ok: boolean }>("/healthz");
 
@@ -232,6 +268,32 @@ export const startChatgptCapture = (payload?: {
 export const getChatgptCaptureTask = (taskId: string) =>
   requestGateway<{ ok: boolean; task: ChatgptCaptureTask }>(
     `/admin/chatgpt-capture/${encodeURIComponent(taskId)}`,
+  );
+
+export const startChatgptRegistration = (payload?: {
+  timeoutMs?: number;
+  headless?: boolean;
+  browserExecutablePath?: string;
+}) =>
+  requestGateway<{ ok: boolean; task: ChatgptRegistrationTask }>("/admin/chatgpt-register/start", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload ?? {}),
+  });
+
+export const getChatgptRegistrationTask = (taskId: string) =>
+  requestGateway<{ ok: boolean; task: ChatgptRegistrationTask }>(
+    `/admin/chatgpt-register/${encodeURIComponent(taskId)}`,
+  );
+
+export const cancelChatgptRegistrationTask = (taskId: string) =>
+  requestGateway<{ ok: boolean; task: ChatgptRegistrationTask }>(
+    `/admin/chatgpt-register/${encodeURIComponent(taskId)}/cancel`,
+    {
+      method: "POST",
+    },
   );
 
 export const saveChatgptCaptureTask = (

@@ -1,328 +1,48 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
 import { Separator } from "reka-ui";
-import {
-  createGatewayToken,
-  fetchGatewayTokens,
-  revokeGatewayToken,
-  updateGatewayTokenTtl,
-  type GatewayManagedTokenItem,
-  type GatewayPrimaryTokenInfo,
-} from "../services/gateway-api.ts";
+import { useTokensPage } from "../composables/use-tokens-page.ts";
+import { formatDateTime, formatExpiry, formatTokenStatus } from "../stores/tokens.ts";
 
-const loading = ref(false);
-const required = ref(true);
-const primaryToken = ref<GatewayPrimaryTokenInfo | null>(null);
-const tokens = ref<GatewayManagedTokenItem[]>([]);
-const pageError = ref("");
-const pageFeedback = ref("");
-const pageFeedbackTone = ref<"success" | "error">("success");
-const busyTokenId = ref<string | null>(null);
-
-const createDialogRef = ref<HTMLDialogElement | null>(null);
-const createSubmitting = ref(false);
-const createName = ref("");
-const createNeverExpires = ref(false);
-const createTtlHours = ref("168");
-const createFeedback = ref("");
-const createFeedbackTone = ref<"success" | "error">("success");
-
-const ttlDialogRef = ref<HTMLDialogElement | null>(null);
-const ttlSubmitting = ref(false);
-const editingTokenId = ref("");
-const editingTokenName = ref("");
-const ttlNeverExpires = ref(false);
-const ttlHours = ref("168");
-const ttlFeedback = ref("");
-const ttlFeedbackTone = ref<"success" | "error">("success");
-
-const revealDialogRef = ref<HTMLDialogElement | null>(null);
-const revealedTokenValue = ref("");
-const revealFeedback = ref("");
-
-const activeCount = computed(
-  () => tokens.value.filter((token) => token.status === "active").length,
-);
-const revokedCount = computed(
-  () => tokens.value.filter((token) => token.status === "revoked").length,
-);
-const expiredCount = computed(
-  () => tokens.value.filter((token) => token.status === "expired").length,
-);
-
-const setPageFeedback = (message: string, tone: "success" | "error") => {
-  pageFeedback.value = message;
-  pageFeedbackTone.value = tone;
-};
-
-const setCreateFeedback = (message: string, tone: "success" | "error") => {
-  createFeedback.value = message;
-  createFeedbackTone.value = tone;
-};
-
-const setTtlFeedback = (message: string, tone: "success" | "error") => {
-  ttlFeedback.value = message;
-  ttlFeedbackTone.value = tone;
-};
-
-const formatDateTime = (value: string | null) => {
-  if (!value) {
-    return "-";
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return "时间未知";
-  }
-
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(parsed);
-};
-
-const formatExpiry = (token: GatewayManagedTokenItem) => {
-  if (token.status === "revoked") {
-    return "已销毁";
-  }
-
-  if (!token.expiresAt) {
-    return "永不过期";
-  }
-
-  return formatDateTime(token.expiresAt);
-};
-
-const formatTokenStatus = (status: GatewayManagedTokenItem["status"]) => {
-  if (status === "active") {
-    return "生效中";
-  }
-
-  if (status === "expired") {
-    return "已过期";
-  }
-
-  return "已销毁";
-};
-
-const parsePositiveHours = (rawHours: string, fieldLabel: string) => {
-  const parsed = Number(rawHours);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
-    throw new Error(`${fieldLabel}必须是整数小时。`);
-  }
-
-  if (parsed <= 0) {
-    throw new Error(`${fieldLabel}必须大于 0。`);
-  }
-
-  if (parsed > 24 * 365 * 10) {
-    throw new Error(`${fieldLabel}不能超过 10 年。`);
-  }
-
-  return parsed;
-};
-
-const copyText = async (value: string, successMessage: string) => {
-  if (!value) {
-    return;
-  }
-
-  try {
-    await navigator.clipboard.writeText(value);
-    setPageFeedback(successMessage, "success");
-  } catch {
-    setPageFeedback("复制失败，请手动复制。", "error");
-  }
-};
-
-const loadTokens = async () => {
-  if (loading.value) {
-    return;
-  }
-
-  loading.value = true;
-  pageError.value = "";
-
-  try {
-    const payload = await fetchGatewayTokens();
-    required.value = Boolean(payload.required);
-    primaryToken.value = payload.primaryToken;
-    tokens.value = payload.tokens;
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "Token 列表读取失败。";
-  } finally {
-    loading.value = false;
-  }
-};
-
-const openCreateDialog = () => {
-  createName.value = "";
-  createNeverExpires.value = false;
-  createTtlHours.value = "168";
-  createFeedback.value = "";
-  createDialogRef.value?.showModal();
-};
-
-const closeCreateDialog = () => {
-  createDialogRef.value?.close();
-};
-
-const openRevealDialog = (token: string) => {
-  revealedTokenValue.value = token;
-  revealFeedback.value = "";
-  revealDialogRef.value?.showModal();
-};
-
-const closeRevealDialog = () => {
-  revealDialogRef.value?.close();
-};
-
-const submitCreate = async () => {
-  if (createSubmitting.value) {
-    return;
-  }
-
-  createSubmitting.value = true;
-  createFeedback.value = "";
-
-  try {
-    const ttlSeconds = createNeverExpires.value
-      ? null
-      : parsePositiveHours(createTtlHours.value, "有效时长") * 3600;
-    const payload = await createGatewayToken({
-      name: createName.value.trim() || undefined,
-      ttlSeconds,
-    });
-
-    closeCreateDialog();
-    openRevealDialog(payload.token);
-    setPageFeedback("Token 已创建。", "success");
-    await loadTokens();
-  } catch (error) {
-    setCreateFeedback(
-      error instanceof Error ? error.message : "Token 创建失败。",
-      "error",
-    );
-  } finally {
-    createSubmitting.value = false;
-  }
-};
-
-const openTtlDialog = (token: GatewayManagedTokenItem) => {
-  editingTokenId.value = token.id;
-  editingTokenName.value = token.name;
-  ttlFeedback.value = "";
-
-  if (!token.expiresAt) {
-    ttlNeverExpires.value = true;
-    ttlHours.value = "168";
-  } else {
-    const expiresAtMs = new Date(token.expiresAt).getTime();
-    const hoursRemaining = Math.max(1, Math.ceil((expiresAtMs - Date.now()) / 3_600_000));
-    ttlNeverExpires.value = false;
-    ttlHours.value = String(hoursRemaining);
-  }
-
-  ttlDialogRef.value?.showModal();
-};
-
-const closeTtlDialog = () => {
-  ttlDialogRef.value?.close();
-};
-
-const submitTtlUpdate = async () => {
-  if (ttlSubmitting.value || !editingTokenId.value) {
-    return;
-  }
-
-  ttlSubmitting.value = true;
-  ttlFeedback.value = "";
-
-  try {
-    const nextTtlSeconds = ttlNeverExpires.value
-      ? null
-      : parsePositiveHours(ttlHours.value, "有效时长") * 3600;
-    await updateGatewayTokenTtl(editingTokenId.value, nextTtlSeconds);
-
-    closeTtlDialog();
-    setPageFeedback("Token 时效已更新。", "success");
-    await loadTokens();
-  } catch (error) {
-    setTtlFeedback(
-      error instanceof Error ? error.message : "Token 时效更新失败。",
-      "error",
-    );
-  } finally {
-    ttlSubmitting.value = false;
-  }
-};
-
-const destroyToken = async (token: GatewayManagedTokenItem) => {
-  if (token.status === "revoked") {
-    return;
-  }
-
-  const confirmed = window.confirm(`确认销毁 Token「${token.name}」吗？销毁后无法恢复。`);
-  if (!confirmed) {
-    return;
-  }
-
-  busyTokenId.value = token.id;
-
-  try {
-    await revokeGatewayToken(token.id);
-    setPageFeedback("Token 已销毁。", "success");
-    await loadTokens();
-  } catch (error) {
-    setPageFeedback(
-      error instanceof Error ? error.message : "Token 销毁失败。",
-      "error",
-    );
-  } finally {
-    busyTokenId.value = null;
-  }
-};
-
-const closeOnBackdropClick = (
-  dialog: HTMLDialogElement | null,
-  event: MouseEvent,
-) => {
-  if (!dialog) {
-    return;
-  }
-
-  const rect = dialog.getBoundingClientRect();
-  const isInsideDialog =
-    rect.top <= event.clientY &&
-    event.clientY <= rect.top + rect.height &&
-    rect.left <= event.clientX &&
-    event.clientX <= rect.left + rect.width;
-
-  if (!isInsideDialog) {
-    dialog.close();
-  }
-};
-
-const onCreateDialogClick = (event: MouseEvent) => {
-  closeOnBackdropClick(createDialogRef.value, event);
-};
-
-const onTtlDialogClick = (event: MouseEvent) => {
-  closeOnBackdropClick(ttlDialogRef.value, event);
-};
-
-const onRevealDialogClick = (event: MouseEvent) => {
-  closeOnBackdropClick(revealDialogRef.value, event);
-};
-
-onMounted(() => {
-  void loadTokens();
-});
+const {
+  required,
+  primaryToken,
+  tokens,
+  pageError,
+  pageFeedback,
+  pageFeedbackTone,
+  busyTokenId,
+  activeCount,
+  revokedCount,
+  expiredCount,
+  createSubmitting,
+  createName,
+  createNeverExpires,
+  createTtlHours,
+  createFeedback,
+  createFeedbackTone,
+  ttlSubmitting,
+  editingTokenName,
+  ttlNeverExpires,
+  ttlHours,
+  ttlFeedback,
+  ttlFeedbackTone,
+  revealedTokenValue,
+  createDialogRef,
+  ttlDialogRef,
+  revealDialogRef,
+  openCreateDialog,
+  closeCreateDialog,
+  closeRevealDialog,
+  submitCreate,
+  openTtlDialog,
+  closeTtlDialog,
+  submitTtlUpdate,
+  destroyToken,
+  copyText,
+  onCreateDialogClick,
+  onTtlDialogClick,
+  onRevealDialogClick,
+} = useTokensPage();
 </script>
 
 <template>
@@ -581,7 +301,6 @@ onMounted(() => {
           </div>
         </label>
 
-        <p v-if="revealFeedback" class="token-feedback token-feedback--success">{{ revealFeedback }}</p>
       </div>
     </dialog>
   </div>

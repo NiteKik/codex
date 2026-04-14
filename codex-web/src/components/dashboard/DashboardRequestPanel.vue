@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { AccountRow, WorkspaceKind } from "../../services/gateway-api.ts";
+import type { AccountRow } from "../../services/gateway-api.ts";
+import {
+  buildDashboardAccountsById,
+  resolveDashboardAccountIdentity,
+} from "./account-identity.ts";
 import { formatDashboardDateTime, type DashboardRequestLog } from "./dashboard-model.ts";
 
 const props = defineProps<{
@@ -8,43 +12,14 @@ const props = defineProps<{
   requests: DashboardRequestLog[];
 }>();
 
-const workspaceKindLabelMap: Record<WorkspaceKind, string> = {
-  personal: "个人",
-  team: "团队",
-  unknown: "未识别",
-};
-
 const accountsById = computed(() => {
-  const map = new Map<string, AccountRow>();
-  for (const account of props.accounts) {
-    map.set(account.id, account);
-  }
-  return map;
+  return buildDashboardAccountsById(props.accounts);
 });
-
-const resolveAccountIdentity = (accountId: string) => {
-  const account = accountsById.value.get(accountId);
-  if (!account) {
-    return {
-      name: accountId,
-      id: accountId,
-      workspaceKindLabel: "未知空间",
-      workspaceName: null as string | null,
-    };
-  }
-
-  return {
-    name: account.name || account.id,
-    id: account.id,
-    workspaceKindLabel: workspaceKindLabelMap[account.workspace.kind] ?? "未识别",
-    workspaceName: account.workspace.name,
-  };
-};
 
 const readableRequests = computed(() =>
   props.requests.map((request) => ({
     ...request,
-    identity: resolveAccountIdentity(request.account_id),
+    identity: resolveDashboardAccountIdentity(accountsById.value, request.account_id),
   })),
 );
 </script>

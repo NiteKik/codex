@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { AccountRow, WorkspaceKind } from "../../services/gateway-api.ts";
+import type { AccountRow } from "../../services/gateway-api.ts";
+import {
+  buildDashboardAccountsById,
+  resolveDashboardAccountIdentity,
+} from "./account-identity.ts";
 import {
   formatDashboardDateTime,
   formatDashboardPercent,
@@ -17,12 +21,6 @@ const scoreWeights = Object.freeze({
   switching: 0.12,
 });
 
-const workspaceKindLabelMap: Record<WorkspaceKind, string> = {
-  personal: "个人",
-  team: "团队",
-  unknown: "未识别",
-};
-
 const props = defineProps<{
   selectedDecision: DashboardDecisionLog | null;
   breakdown: ScoreBreakdown[];
@@ -32,45 +30,23 @@ const props = defineProps<{
 const maxTotal = computed(() => Math.max(...props.breakdown.map((entry) => entry.total), 0.01));
 
 const accountsById = computed(() => {
-  const map = new Map<string, AccountRow>();
-  for (const account of props.accounts) {
-    map.set(account.id, account);
-  }
-  return map;
+  return buildDashboardAccountsById(props.accounts);
 });
-
-const resolveAccountIdentity = (accountId: string) => {
-  const account = accountsById.value.get(accountId);
-  if (!account) {
-    return {
-      name: accountId,
-      id: accountId,
-      workspaceKind: "unknown" as WorkspaceKind,
-      workspaceKindLabel: "未知空间",
-      workspaceName: null as string | null,
-    };
-  }
-
-  return {
-    name: account.name || account.id,
-    id: account.id,
-    workspaceKind: account.workspace.kind,
-    workspaceKindLabel: workspaceKindLabelMap[account.workspace.kind] ?? "未识别",
-    workspaceName: account.workspace.name,
-  };
-};
 
 const selectedIdentity = computed(() => {
   if (!props.selectedDecision) {
     return null;
   }
-  return resolveAccountIdentity(props.selectedDecision.selected_account_id);
+  return resolveDashboardAccountIdentity(
+    accountsById.value,
+    props.selectedDecision.selected_account_id,
+  );
 });
 
 const scoreCards = computed(() =>
   props.breakdown.map((item) => ({
     ...item,
-    identity: resolveAccountIdentity(item.accountId),
+    identity: resolveDashboardAccountIdentity(accountsById.value, item.accountId),
     contributions: {
       weekly: item.weeklyRemainingRatio * scoreWeights.weekly,
       window: item.windowRemainingRatio * scoreWeights.window,

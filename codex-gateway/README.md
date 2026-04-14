@@ -42,6 +42,11 @@ bun install
 bun run start
 ```
 
+Runtime note:
+
+- Gateway startup uses Node.js runtime (build via Bun, then run `node dist/index.js`).
+- This avoids known Windows compatibility issues between Bun runtime and Playwright browser launch.
+
 ## Try
 
 ```bash

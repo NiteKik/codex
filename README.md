@@ -1,6 +1,7 @@
 # Codex Workspace
 
-This repository now uses Bun as the only runtime and package manager.
+This repository uses Bun as the package manager.
+For `codex-gateway`, runtime execution is Node.js (to avoid Windows/Bun + Playwright issues).
 
 ## Subprojects
 
@@ -29,6 +30,10 @@ bun run typecheck
 bun run --cwd ./codex-web dev
 bun run --cwd ./codex-gateway dev
 ```
+
+Gateway note:
+
+- `bun run dev:gateway` / `bun run --cwd ./codex-gateway dev` now build with Bun and run with Node.
 
 ## Gateway quick check
 

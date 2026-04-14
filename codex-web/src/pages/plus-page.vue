@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref } from "vue";
 import { renderPlusPage } from "../legacy/plus-render.ts";
 
 const containerRef = ref<HTMLElement | null>(null);
+const cleanupRef = ref<(() => void) | null>(null);
 
 onMounted(() => {
   if (!containerRef.value) {
     throw new Error("Plus root not found.");
   }
 
-  renderPlusPage(containerRef.value);
+  cleanupRef.value = renderPlusPage(containerRef.value);
+});
+
+onUnmounted(() => {
+  cleanupRef.value?.();
+  cleanupRef.value = null;
 });
 </script>
 

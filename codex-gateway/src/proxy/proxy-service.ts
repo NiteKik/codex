@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { AccountManager } from "../accounts/account-manager.js";
 import { config } from "../config.js";
 import { GatewayDatabase } from "../db/database.js";
+import { ChatgptSessionRefreshManager } from "../integrations/chatgpt-session-refresh-manager.js";
 import type { Account } from "../types.js";
 import type { ProviderClient } from "../providers/provider-client.js";
 import { QuotaVirtualizer } from "../quota/quota-virtualizer.js";
@@ -146,6 +147,7 @@ export class ProxyService {
     private readonly scheduler: Scheduler,
     private readonly sessionManager: SessionManager,
     private readonly quotaVirtualizer: QuotaVirtualizer,
+    private readonly sessionRefreshManager?: ChatgptSessionRefreshManager,
   ) {}
 
   async handle(request: FastifyRequest, reply: FastifyReply) {
@@ -165,6 +167,7 @@ export class ProxyService {
     const requestId = randomUUID();
     const initialEstimatedUnits = estimateUnits(request.body);
     const excludedAccountIds: string[] = [];
+    const refreshedAccountIds = new Set<string>();
     const body = serializeBody(request.body);
     const queryString = request.url.includes("?")
       ? request.url.slice(request.url.indexOf("?"))
@@ -202,6 +205,13 @@ export class ProxyService {
           durationMs: null,
           startedAt: nowIso(),
           finishedAt: null,
+          model: null,
+          inputTokens: null,
+          outputTokens: null,
+          reasoningTokens: null,
+          cachedInputTokens: null,
+          totalTokens: null,
+          tokenCaptureSource: null,
         });
 
         const upstreamPath = this.resolveUpstreamPath(decision.account, proxyPath);
@@ -224,6 +234,58 @@ export class ProxyService {
           throw new Error(
             "Upstream returned HTML for responses endpoint. Verify path mapping/authentication.",
           );
+        }
+
+        if (
+          (upstream.upstreamStatus === 401 || upstream.upstreamStatus === 403) &&
+          this.sessionRefreshManager?.canRefreshAccount(decision.account) &&
+          !refreshedAccountIds.has(decision.account.id)
+        ) {
+          refreshedAccountIds.add(decision.account.id);
+          try {
+            this.db.logRuntime({
+              level: "warn",
+              scope: "proxy",
+              event: "proxy.auth_refresh_started",
+              message: "代理请求命中鉴权错误，尝试自动刷新 session",
+              accountId: decision.account.id,
+              requestId,
+              sessionId,
+              detailsJson: JSON.stringify({
+                proxyPath,
+                upstreamStatus: upstream.upstreamStatus,
+              }),
+              createdAt: nowIso(),
+            });
+            await this.sessionRefreshManager.refreshAccountSession(decision.account.id, {
+              reason: `proxy:${proxyPath}:${upstream.upstreamStatus}`,
+            });
+            this.quotaVirtualizer.release(decision.reservation.id);
+            this.db.logRequestFinish(requestLogId, {
+              upstreamStatus: upstream.upstreamStatus,
+              errorCode: `auth_refreshed_${upstream.upstreamStatus}`,
+              errorMessage: "Managed session refreshed; retrying request",
+              durationMs: Date.now() - startedAt,
+              finishedAt: nowIso(),
+            });
+            continue;
+          } catch (refreshError) {
+            this.db.logRuntime({
+              level: "warn",
+              scope: "proxy",
+              event: "proxy.auth_refresh_failed",
+              message:
+                refreshError instanceof Error ? refreshError.message : "自动刷新 session 失败。",
+              accountId: decision.account.id,
+              requestId,
+              sessionId,
+              detailsJson: JSON.stringify({
+                proxyPath,
+                upstreamStatus: upstream.upstreamStatus,
+              }),
+              createdAt: nowIso(),
+            });
+          }
         }
 
         if (retryableStatuses.has(upstream.upstreamStatus) && attempt < config.maxProxyAttempts) {

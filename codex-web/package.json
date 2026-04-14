@@ -6,6 +6,10 @@
   "scripts": {
     "dev": "vp dev",
     "build": "tsc && vp build",
+    "check": "vp check",
+    "lint": "vp lint",
+    "test": "vp test --run",
+    "ci": "bun run typecheck && bun run lint && bun run test",
     "typecheck": "tsc --noEmit",
     "preview": "vp preview",
     "prepare": "vp config"
@@ -24,6 +28,7 @@
   "dependencies": {
     "pinia": "^3.0.4",
     "reka-ui": "^2.9.5",
-    "vue": "^3.5.32"
+    "vue": "^3.5.32",
+    "vue-router": "^4.6.2"
   }
 }

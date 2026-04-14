@@ -1,235 +1,55 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
 import RuntimeLogsPanel from "../components/settings/RuntimeLogsPanel.vue";
-import {
-  getStoredGatewayBaseUrl,
-  normalizeGatewayBaseUrl,
-  saveGatewayBaseUrl,
-} from "../utils/gateway-base-url.ts";
+import { useSettingsPage } from "../composables/use-settings-page.ts";
 
-type GatewayAccessTokenPayload = {
-  ok: boolean;
-  required: boolean;
-  token: string;
-  source: string;
-  tokenFilePath: string | null;
-  authHeader: string;
-  codexConfigSnippet: string;
-  codexEnvVar?: string;
-  windowsSetxCommand?: string;
-  windowsSessionCommand?: string;
-  providerConfigSnippet?: string;
-  openaiBaseUrlConfigSnippet?: string;
-  openaiBaseUrlCompatible?: boolean;
-  strategyDiff?: {
-    providerMode?: string;
-    openaiBaseUrlMode?: string;
-  };
-};
-
-type GatewaySettingsPayload = {
-  ok: boolean;
-  pollIntervalMs: number;
-  pollIntervalSeconds: number;
-  pollIntervalRange: {
-    minSeconds: number;
-    maxSeconds: number;
-  };
-};
-
-const initialBaseUrl = getStoredGatewayBaseUrl();
-const baseUrlInput = ref(initialBaseUrl);
-const activeBaseUrl = ref(initialBaseUrl);
-const saveFeedback = ref("");
-const tokenLoading = ref(false);
-const tokenError = ref("");
-const tokenCopiedFeedback = ref("");
-const tokenValue = ref("");
-const tokenRequired = ref(false);
-const tokenSource = ref("");
-const tokenFilePath = ref("");
-const tokenHeader = ref("");
-const tokenSnippetProvider = ref("");
-const tokenSnippetOpenai = ref("");
-const tokenSetxCommand = ref("");
-const tokenSessionCommand = ref("");
-const openaiModeCompatible = ref(false);
-const providerModeDiff = ref("");
-const openaiModeDiff = ref("");
-const pollIntervalLoading = ref(false);
-const pollIntervalSaving = ref(false);
-const pollIntervalError = ref("");
-const pollIntervalFeedback = ref("");
-const pollIntervalInput = ref("30");
-const pollIntervalMinSeconds = ref(5);
-const pollIntervalMaxSeconds = ref(3600);
-
-const requestBase = async <T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(`${baseUrl}${path}`, init);
-  const rawText = await response.text();
-  const payload = rawText ? (JSON.parse(rawText) as unknown) : null;
-
-  if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && "message" in payload
-        ? String((payload as { message: unknown }).message)
-        : `${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
-
-  return payload as T;
-};
-
-const loadGatewayToken = async () => {
-  if (tokenLoading.value) {
-    return;
-  }
-
-  tokenLoading.value = true;
-  tokenError.value = "";
-  tokenCopiedFeedback.value = "";
-
-  try {
-    const payload = await requestBase<GatewayAccessTokenPayload>(
-      activeBaseUrl.value,
-      "/admin/access-token",
-    );
-    tokenValue.value = payload.token ?? "";
-    tokenRequired.value = Boolean(payload.required);
-    tokenSource.value = payload.source ?? "";
-    tokenFilePath.value = payload.tokenFilePath ?? "";
-    tokenHeader.value = payload.authHeader ?? "";
-    const envVarName = payload.codexEnvVar ?? "QUOTA_GATEWAY_TOKEN";
-    tokenSnippetProvider.value = payload.providerConfigSnippet ?? payload.codexConfigSnippet ?? "";
-    tokenSnippetOpenai.value = payload.openaiBaseUrlConfigSnippet ?? "";
-    tokenSetxCommand.value =
-      payload.windowsSetxCommand ?? `setx ${envVarName} "${payload.token ?? ""}"`;
-    tokenSessionCommand.value =
-      payload.windowsSessionCommand ?? `$env:${envVarName} = "${payload.token ?? ""}"`;
-    openaiModeCompatible.value = Boolean(payload.openaiBaseUrlCompatible);
-    providerModeDiff.value =
-      payload.strategyDiff?.providerMode ?? "需要 env_key token，会切到自定义 provider。";
-    openaiModeDiff.value =
-      payload.strategyDiff?.openaiBaseUrlMode ??
-      "保持 openai provider 历史上下文；通常需要网关关闭 token 强制校验。";
-  } catch (error) {
-    tokenError.value = error instanceof Error ? error.message : "Token 读取失败。";
-  } finally {
-    tokenLoading.value = false;
-  }
-};
-
-const loadGatewaySettings = async () => {
-  if (pollIntervalLoading.value) {
-    return;
-  }
-
-  pollIntervalLoading.value = true;
-  pollIntervalError.value = "";
-
-  try {
-    const payload = await requestBase<GatewaySettingsPayload>(activeBaseUrl.value, "/admin/settings");
-    pollIntervalInput.value = String(payload.pollIntervalSeconds);
-    pollIntervalMinSeconds.value = payload.pollIntervalRange.minSeconds;
-    pollIntervalMaxSeconds.value = payload.pollIntervalRange.maxSeconds;
-  } catch (error) {
-    pollIntervalError.value = error instanceof Error ? error.message : "采集频率读取失败。";
-  } finally {
-    pollIntervalLoading.value = false;
-  }
-};
-
-const applyPollIntervalPreset = (seconds: number) => {
-  pollIntervalInput.value = String(seconds);
-  pollIntervalFeedback.value = "";
-  pollIntervalError.value = "";
-};
-
-const savePollIntervalSetting = async () => {
-  if (pollIntervalSaving.value) {
-    return;
-  }
-
-  pollIntervalError.value = "";
-  pollIntervalFeedback.value = "";
-
-  const parsed = Number(pollIntervalInput.value);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
-    pollIntervalError.value = "采集频率必须是整数秒。";
-    return;
-  }
-
-  if (parsed < pollIntervalMinSeconds.value || parsed > pollIntervalMaxSeconds.value) {
-    pollIntervalError.value = `采集频率需在 ${pollIntervalMinSeconds.value}-${pollIntervalMaxSeconds.value} 秒之间。`;
-    return;
-  }
-
-  pollIntervalSaving.value = true;
-
-  try {
-    const payload = await requestBase<GatewaySettingsPayload>(activeBaseUrl.value, "/admin/settings", {
-      method: "PUT",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        pollIntervalSeconds: parsed,
-      }),
-    });
-    pollIntervalInput.value = String(payload.pollIntervalSeconds);
-    pollIntervalFeedback.value = `已保存，当前采集频率 ${payload.pollIntervalSeconds} 秒。`;
-  } catch (error) {
-    pollIntervalError.value = error instanceof Error ? error.message : "采集频率保存失败。";
-  } finally {
-    pollIntervalSaving.value = false;
-  }
-};
-
-const copyText = async (value: string, successMessage: string) => {
-  if (!value) {
-    return;
-  }
-
-  try {
-    await navigator.clipboard.writeText(value);
-    tokenCopiedFeedback.value = successMessage;
-  } catch {
-    tokenCopiedFeedback.value = "复制失败，请手动复制。";
-  }
-};
-
-const copyGatewayToken = async () => copyText(tokenValue.value, "Token 已复制。");
-
-const copyGatewayHeader = async () =>
-  copyText(tokenHeader.value, "Authorization Header 已复制。");
-
-const copyProviderSnippet = async () =>
-  copyText(tokenSnippetProvider.value, "方案 A 配置片段已复制。");
-
-const copyOpenaiSnippet = async () =>
-  copyText(tokenSnippetOpenai.value, "方案 B 配置片段已复制。");
-
-const copySetxCommand = async () => copyText(tokenSetxCommand.value, "setx 命令已复制。");
-
-const copySessionCommand = async () =>
-  copyText(tokenSessionCommand.value, "当前终端环境变量命令已复制。");
-
-const saveBaseUrlSetting = () => {
-  const normalized = normalizeGatewayBaseUrl(baseUrlInput.value);
-  baseUrlInput.value = normalized;
-  activeBaseUrl.value = saveGatewayBaseUrl(normalized);
-  saveFeedback.value =
-    activeBaseUrl.value === "/gateway-api"
-      ? "已保存，当前使用本地代理 /gateway-api。"
-      : `已保存，当前使用 ${activeBaseUrl.value}。`;
-  void loadGatewayToken();
-  void loadGatewaySettings();
-};
-
-onMounted(() => {
-  void loadGatewayToken();
-  void loadGatewaySettings();
-});
+const {
+  activeBaseUrl,
+  codexAutoConfigActive,
+  codexAutoConfigBackupExists,
+  codexAutoConfigBackupPath,
+  codexAutoConfigConfigPath,
+  codexAutoConfigEnabled,
+  codexAutoConfigError,
+  codexAutoConfigFeedback,
+  codexAutoConfigGuardianPid,
+  codexAutoConfigGuardianRunning,
+  codexAutoConfigLastAppliedAt,
+  codexAutoConfigLastError,
+  codexAutoConfigLoading,
+  codexAutoConfigMode,
+  codexAutoConfigModeInput,
+  codexAutoConfigResolvedMode,
+  codexAutoConfigBunAvailable,
+  codexAutoConfigSaving,
+  baseUrlInput,
+  copyGatewayHeader,
+  copyGatewayToken,
+  copyOpenaiSnippet,
+  copyProviderSnippet,
+  copySessionCommand,
+  copySetxCommand,
+  loadCodexAutoConfigStatus,
+  loadGatewayToken,
+  openaiModeCompatible,
+  openaiModeDiff,
+  providerModeDiff,
+  saveBaseUrlSetting,
+  saveFeedback,
+  saveCodexAutoConfigMode,
+  toggleCodexAutoConfig,
+  tokenCopiedFeedback,
+  tokenError,
+  tokenFilePath,
+  tokenHeader,
+  tokenLoading,
+  tokenRequired,
+  tokenSessionCommand,
+  tokenSetxCommand,
+  tokenSnippetOpenai,
+  tokenSnippetProvider,
+  tokenSource,
+  tokenValue,
+} = useSettingsPage();
 </script>
 
 <template>
@@ -261,63 +81,103 @@ onMounted(() => {
     <section class="settings-card settings-token-card">
       <div class="settings-token-head">
         <div>
-          <span class="settings-kicker">Quota Polling</span>
-          <h2>额度采集频率</h2>
+          <span class="settings-kicker">Codex Config</span>
+          <h2>自动配置</h2>
           <p class="settings-helper">
-            后端会按此频率自动采集额度，支持秒级配置（例如 30 秒）。
+            开启后将自动备份并接管用户目录 <code>.codex/config.toml</code>，关闭或项目退出时自动还原。
           </p>
         </div>
         <button
           type="button"
           class="secondary-btn"
-          :disabled="pollIntervalLoading"
-          @click="loadGatewaySettings"
+          :disabled="codexAutoConfigLoading"
+          @click="loadCodexAutoConfigStatus"
         >
-          {{ pollIntervalLoading ? "读取中..." : "刷新设置" }}
+          {{ codexAutoConfigLoading ? "读取中..." : "刷新状态" }}
         </button>
       </div>
 
-      <div class="settings-label-row">
-        <label class="settings-label" for="settingsPollIntervalSeconds">采集频率（秒）</label>
-        <div class="settings-presets">
-          <button type="button" class="secondary-btn" @click="applyPollIntervalPreset(30)">
-            30s
-          </button>
-          <button type="button" class="secondary-btn" @click="applyPollIntervalPreset(60)">
-            60s
-          </button>
-        </div>
+      <div class="settings-diff-grid">
+        <article class="settings-diff-item">
+          <strong>当前状态</strong>
+          <p>
+            {{ codexAutoConfigEnabled ? "已开启" : "已关闭" }} ·
+            {{ codexAutoConfigActive ? "配置已接管" : "未接管" }}
+          </p>
+        </article>
+        <article class="settings-diff-item">
+          <strong>守护进程</strong>
+          <p>
+            {{ codexAutoConfigGuardianRunning ? "运行中" : "未运行" }}
+            <template v-if="codexAutoConfigGuardianPid">（PID: {{ codexAutoConfigGuardianPid }}）</template>
+          </p>
+        </article>
       </div>
 
-      <div class="settings-url-row">
-        <input
-          id="settingsPollIntervalSeconds"
-          v-model="pollIntervalInput"
-          class="settings-input"
-          type="number"
-          :min="pollIntervalMinSeconds"
-          :max="pollIntervalMaxSeconds"
-          step="1"
-        />
+      <p class="settings-helper">配置文件：<code>{{ codexAutoConfigConfigPath || "-" }}</code></p>
+      <p class="settings-helper">
+        备份文件：<code>{{ codexAutoConfigBackupPath || "-" }}</code> ·
+        {{ codexAutoConfigBackupExists ? "已存在" : "未创建" }}
+      </p>
+      <p v-if="codexAutoConfigLastAppliedAt" class="settings-helper">
+        最近应用时间：{{ codexAutoConfigLastAppliedAt }}
+      </p>
+      <div class="settings-label-row">
+        <label class="settings-label" for="settingsCodexAutoConfigMode">自动配置模式</label>
         <button
           type="button"
           class="secondary-btn"
-          :disabled="pollIntervalSaving"
-          @click="savePollIntervalSetting"
+          :disabled="codexAutoConfigSaving"
+          @click="saveCodexAutoConfigMode"
         >
-          {{ pollIntervalSaving ? "保存中..." : "保存频率" }}
+          保存模式
         </button>
       </div>
-
+      <select
+        id="settingsCodexAutoConfigMode"
+        v-model="codexAutoConfigModeInput"
+        class="settings-input"
+      >
+        <option value="openai_base_url">保留历史会话（推荐）</option>
+        <option value="openai_base_url_no_forced">保留历史会话（仅 openai_base_url）</option>
+      </select>
       <p class="settings-helper">
-        可配置范围：{{ pollIntervalMinSeconds }} - {{ pollIntervalMaxSeconds }} 秒。
+        Bun 可用性：{{ codexAutoConfigBunAvailable ? "已检测到" : "未检测到" }}。
       </p>
-      <p v-if="pollIntervalError" class="settings-feedback settings-feedback--error">
-        {{ pollIntervalError }}
+      <p
+        v-if="codexAutoConfigResolvedMode !== codexAutoConfigModeInput"
+        class="settings-helper"
+      >
+        已自动回退为：{{ codexAutoConfigResolvedMode }}。
       </p>
-      <p v-if="pollIntervalFeedback" class="settings-feedback">
-        {{ pollIntervalFeedback }}
+      <p class="settings-helper">
+        保留历史会话模式要求网关关闭 token 强校验（`REQUIRE_GATEWAY_ACCESS_TOKEN=0`）。
+        `openai_base_url_no_forced` 不强制登录方式，适合自定义登录策略。
       </p>
+      <p v-if="codexAutoConfigLastError" class="settings-feedback settings-feedback--error">
+        最近错误：{{ codexAutoConfigLastError }}
+      </p>
+      <p v-if="codexAutoConfigError" class="settings-feedback settings-feedback--error">
+        {{ codexAutoConfigError }}
+      </p>
+      <p v-if="codexAutoConfigFeedback" class="settings-feedback">{{ codexAutoConfigFeedback }}</p>
+
+      <div class="settings-actions">
+        <button
+          type="button"
+          class="secondary-btn"
+          :disabled="codexAutoConfigSaving"
+          @click="toggleCodexAutoConfig"
+        >
+          {{
+            codexAutoConfigSaving
+              ? "处理中..."
+              : codexAutoConfigEnabled
+                ? "关闭自动配置"
+                : "开启自动配置"
+          }}
+        </button>
+      </div>
     </section>
 
     <section class="settings-card settings-token-card">
@@ -617,6 +477,11 @@ onMounted(() => {
   color: rgba(246, 239, 230, 0.72);
 }
 
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .settings-token-card {
   gap: 12px;
 }
@@ -637,12 +502,6 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-}
-
-.settings-presets {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .settings-textarea {

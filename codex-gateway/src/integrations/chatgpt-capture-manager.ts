@@ -1,137 +1,16 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { platform } from "node:os";
 import { join } from "node:path";
 import WebSocket, { type RawData } from "ws";
-import type { WorkspaceContext, WorkspaceKind } from "../types.js";
+import type { WorkspaceContext } from "../types.js";
+import { resolveManagedBrowserExecutablePath } from "./chatgpt-managed-browser.js";
+import { parseSessionPayload } from "./chatgpt-session-utils.js";
 import { nowIso } from "../utils/time.js";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
-const pickStringAtPath = (payload: unknown, path: string[]) => {
-  let cursor: unknown = payload;
-  for (const key of path) {
-    if (!isRecord(cursor)) {
-      return null;
-    }
-    cursor = cursor[key];
-  }
-
-  return typeof cursor === "string" && cursor.trim().length > 0 ? cursor.trim() : null;
-};
-
-const pickRecordAtPath = (payload: unknown, path: string[]) => {
-  let cursor: unknown = payload;
-  for (const key of path) {
-    if (!isRecord(cursor)) {
-      return null;
-    }
-    cursor = cursor[key];
-  }
-
-  return isRecord(cursor) ? cursor : null;
-};
-
-const toWorkspaceKind = (value: string | null): WorkspaceKind => {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  if (!normalized) {
-    return "unknown";
-  }
-  if (
-    normalized.includes("team") ||
-    normalized.includes("business") ||
-    normalized.includes("enterprise") ||
-    normalized.includes("org")
-  ) {
-    return "team";
-  }
-  if (
-    normalized.includes("personal") ||
-    normalized.includes("individual") ||
-    normalized.includes("free") ||
-    normalized.includes("plus") ||
-    normalized.includes("pro")
-  ) {
-    return "personal";
-  }
-
-  return "unknown";
-};
-
-const extractWorkspaceFromSession = (payload: unknown): WorkspaceContext => {
-  const directWorkspace =
-    pickRecordAtPath(payload, ["workspace"]) ??
-    pickRecordAtPath(payload, ["active_workspace"]) ??
-    pickRecordAtPath(payload, ["current_workspace"]) ??
-    pickRecordAtPath(payload, ["selected_workspace"]) ??
-    pickRecordAtPath(payload, ["account"]) ??
-    pickRecordAtPath(payload, ["active_account"]) ??
-    pickRecordAtPath(payload, ["organization"]) ??
-    pickRecordAtPath(payload, ["active_organization"]);
-
-  const workspaceId =
-    pickStringAtPath(payload, ["active_workspace_id"]) ??
-    pickStringAtPath(payload, ["workspace_id"]) ??
-    pickStringAtPath(payload, ["default_workspace_id"]) ??
-    pickStringAtPath(payload, ["active_account_id"]) ??
-    pickStringAtPath(payload, ["account_id"]) ??
-    pickStringAtPath(payload, ["organization_id"]) ??
-    (directWorkspace
-      ? pickStringAtPath(directWorkspace, ["id"]) ??
-        pickStringAtPath(directWorkspace, ["workspace_id"]) ??
-        pickStringAtPath(directWorkspace, ["account_id"]) ??
-        pickStringAtPath(directWorkspace, ["organization_id"])
-      : null);
-
-  const workspaceName =
-    (directWorkspace
-      ? pickStringAtPath(directWorkspace, ["name"]) ??
-        pickStringAtPath(directWorkspace, ["display_name"]) ??
-        pickStringAtPath(directWorkspace, ["workspace_name"]) ??
-        pickStringAtPath(directWorkspace, ["title"])
-      : null) ??
-    pickStringAtPath(payload, ["workspace_name"]) ??
-    pickStringAtPath(payload, ["account_name"]) ??
-    pickStringAtPath(payload, ["organization_name"]);
-
-  const kindHint =
-    (directWorkspace
-      ? pickStringAtPath(directWorkspace, ["type"]) ??
-        pickStringAtPath(directWorkspace, ["workspace_type"]) ??
-        pickStringAtPath(directWorkspace, ["plan_type"])
-      : null) ??
-    pickStringAtPath(payload, ["workspace_type"]) ??
-    pickStringAtPath(payload, ["account_type"]) ??
-    pickStringAtPath(payload, ["organization_type"]) ??
-    pickStringAtPath(payload, ["plan_type"]) ??
-    pickStringAtPath(payload, ["user", "plan_type"]) ??
-    workspaceName;
-
-  return {
-    kind: toWorkspaceKind(kindHint),
-    id: workspaceId,
-    name: workspaceName,
-    headers: null,
-  };
-};
-
-const parseSessionPayload = (payload: unknown) => {
-  const email = pickStringAtPath(payload, ["user", "email"]) ?? pickStringAtPath(payload, ["email"]);
-  const accessToken =
-    pickStringAtPath(payload, ["accessToken"]) ?? pickStringAtPath(payload, ["access_token"]);
-
-  if (!email || !accessToken) {
-    return null;
-  }
-
-  return {
-    email,
-    accessToken,
-    workspace: extractWorkspaceFromSession(payload),
-  };
-};
 
 const sanitizeProfileKey = (value: string) => {
   const normalized = value
@@ -142,26 +21,21 @@ const sanitizeProfileKey = (value: string) => {
   return normalized.length > 0 ? normalized : "default";
 };
 
-const resolveBrowserExecutablePath = (preferredPath?: string) => {
-  const candidates = [
-    preferredPath,
-    process.env.BROWSER_EXECUTABLE_PATH,
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-    "/snap/bin/chromium",
-  ].filter((candidate): candidate is string => Boolean(candidate && candidate.trim().length > 0));
-
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-};
-
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const removeDirectoryBestEffort = async (targetDir: string) => {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      rmSync(targetDir, {
+        recursive: true,
+        force: true,
+      });
+      return;
+    } catch {
+      await sleep(300 * (attempt + 1));
+    }
+  }
+};
 
 const getFreeTcpPort = async () =>
   new Promise<number>((resolve, reject) => {
@@ -211,7 +85,7 @@ type CdpPageTarget = {
   webSocketDebuggerUrl?: string;
 };
 
-const waitForChatgptPageWsDebuggerUrl = async (port: number, timeoutMs: number) => {
+const waitForPageWsDebuggerTarget = async (port: number, timeoutMs: number) => {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -220,25 +94,44 @@ const waitForChatgptPageWsDebuggerUrl = async (port: number, timeoutMs: number) 
       if (response.ok) {
         const payload = (await response.json()) as unknown;
         if (Array.isArray(payload)) {
-          const target = payload.find((item): item is CdpPageTarget => {
+          let fallback: CdpPageTarget | null = null;
+          for (const item of payload) {
             if (!isRecord(item)) {
-              return false;
+              continue;
             }
 
             const type = item.type;
             const url = item.url;
             const ws = item.webSocketDebuggerUrl;
-            return (
-              type === "page" &&
-              typeof url === "string" &&
-              url.includes("chatgpt.com") &&
-              typeof ws === "string" &&
-              ws.startsWith("ws://")
-            );
-          });
+            if (
+              type !== "page" ||
+              typeof url !== "string" ||
+              typeof ws !== "string" ||
+              !ws.startsWith("ws://")
+            ) {
+              continue;
+            }
 
-          if (target?.webSocketDebuggerUrl) {
-            return target.webSocketDebuggerUrl;
+            if (url.includes("chatgpt.com") || url.includes("auth.openai.com")) {
+              return {
+                url,
+                wsDebuggerUrl: ws,
+              };
+            }
+
+            fallback ??= {
+              id: typeof item.id === "string" ? item.id : "",
+              type,
+              url,
+              webSocketDebuggerUrl: ws,
+            };
+          }
+
+          if (fallback?.webSocketDebuggerUrl) {
+            return {
+              url: fallback.url,
+              wsDebuggerUrl: fallback.webSocketDebuggerUrl,
+            };
           }
         }
       }
@@ -249,12 +142,14 @@ const waitForChatgptPageWsDebuggerUrl = async (port: number, timeoutMs: number) 
     await sleep(300);
   }
 
-  throw new Error("浏览器调试端口未就绪或未检测到 chatgpt 页面。");
+  throw new Error("浏览器调试端口未就绪或未检测到可调试页面。");
 };
 
-const evaluateCdpExpression = async <T>(
+const runCdpCommand = async <T>(
   wsUrl: string,
-  expression: string,
+  method: string,
+  params: Record<string, unknown>,
+  extractValue: (parsed: Record<string, unknown>) => T,
   timeoutMs = 15_000,
 ) =>
   new Promise<T>((resolve, reject) => {
@@ -278,7 +173,7 @@ const evaluateCdpExpression = async <T>(
 
     const timer = setTimeout(() => {
       finish(() => {
-        reject(new Error("CDP Runtime.evaluate timeout."));
+        reject(new Error(`CDP ${method} timeout.`));
       });
     }, timeoutMs);
 
@@ -286,12 +181,8 @@ const evaluateCdpExpression = async <T>(
       socket.send(
         JSON.stringify({
           id: 1,
-          method: "Runtime.evaluate",
-          params: {
-            expression,
-            awaitPromise: true,
-            returnByValue: true,
-          },
+          method,
+          params,
         }),
       );
     });
@@ -310,29 +201,17 @@ const evaluateCdpExpression = async <T>(
 
       if (parsed.error) {
         finish(() => {
-          reject(new Error(`CDP evaluate failed: ${JSON.stringify(parsed.error)}`));
-        });
-        return;
-      }
-
-      const resultRoot = parsed.result;
-      if (!isRecord(resultRoot)) {
-        finish(() => {
-          reject(new Error("CDP evaluate returned invalid result."));
-        });
-        return;
-      }
-
-      const runtimeResult = resultRoot.result;
-      if (!isRecord(runtimeResult)) {
-        finish(() => {
-          reject(new Error("CDP evaluate returned invalid runtime result."));
+          reject(new Error(`CDP ${method} failed: ${JSON.stringify(parsed.error)}`));
         });
         return;
       }
 
       finish(() => {
-        resolve(runtimeResult.value as T);
+        try {
+          resolve(extractValue(parsed));
+        } catch (error) {
+          reject(error);
+        }
       });
     });
 
@@ -342,6 +221,46 @@ const evaluateCdpExpression = async <T>(
       });
     });
   });
+
+const evaluateCdpExpression = async <T>(
+  wsUrl: string,
+  expression: string,
+  timeoutMs = 15_000,
+) =>
+  runCdpCommand<T>(
+    wsUrl,
+    "Runtime.evaluate",
+    {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    },
+    (parsed) => {
+      const resultRoot = parsed.result;
+      if (!isRecord(resultRoot)) {
+        throw new Error("CDP evaluate returned invalid result.");
+      }
+
+      const runtimeResult = resultRoot.result;
+      if (!isRecord(runtimeResult)) {
+        throw new Error("CDP evaluate returned invalid runtime result.");
+      }
+
+      return runtimeResult.value as T;
+    },
+    timeoutMs,
+  );
+
+const navigateCdpPage = async (wsUrl: string, url: string, timeoutMs = 15_000) =>
+  runCdpCommand<void>(
+    wsUrl,
+    "Page.navigate",
+    {
+      url,
+    },
+    () => undefined,
+    timeoutMs,
+  );
 
 const tryFetchSessionViaCdp = async (wsUrl: string) =>
   evaluateCdpExpression<{
@@ -477,19 +396,21 @@ const captureSessionWithBrowser = async (
   profileDir: string,
   onProgress: (message: string) => void,
 ) => {
-  const executablePath = resolveBrowserExecutablePath(options.browserExecutablePath);
+  const executablePath = resolveManagedBrowserExecutablePath(options.browserExecutablePath);
   if (!executablePath) {
     throw new Error(
-      "未找到可用浏览器可执行文件。请安装 Edge/Chrome 或设置 BROWSER_EXECUTABLE_PATH。",
+      "未找到可用 Chrome 浏览器。请安装 Chrome 或设置 chrome.exe 路径。",
     );
   }
 
   onProgress("启动浏览器并挂载调试通道...");
   const debugPort = await getFreeTcpPort();
+  mkdirSync(profileDir, { recursive: true });
+  const sessionDir = mkdtempSync(join(profileDir, "capture-"));
   const browserArgs = [
     `--remote-debugging-port=${debugPort}`,
-    `--user-data-dir=${join(profileDir, "profile")}`,
-    "https://chatgpt.com/auth/login",
+    `--user-data-dir=${sessionDir}`,
+    "https://chatgpt.com/",
   ];
   const browserProcess = spawn(executablePath, browserArgs, {
     detached: true,
@@ -499,8 +420,14 @@ const captureSessionWithBrowser = async (
   browserProcess.unref();
 
   try {
-    const wsDebuggerUrl = await waitForChatgptPageWsDebuggerUrl(debugPort, 20_000);
-    onProgress("浏览器已启动，请在窗口中完成 ChatGPT 登录。");
+    const target = await waitForPageWsDebuggerTarget(debugPort, 20_000);
+    const wsDebuggerUrl = target.wsDebuggerUrl;
+    if (!target.url.includes("chatgpt.com") && !target.url.includes("auth.openai.com")) {
+      onProgress("浏览器首屏不是 ChatGPT，正在自动从 about:blank/new tab 跳转...");
+      await navigateCdpPage(wsDebuggerUrl, "https://chatgpt.com/");
+      await sleep(1_500);
+    }
+    onProgress("浏览器已启动，本次使用全新会话环境，并已打开 ChatGPT 首页，请像正常用户一样点击登录并完成流程。");
 
     const deadline = Date.now() + options.timeoutMs;
     while (Date.now() < deadline) {
@@ -538,6 +465,7 @@ const captureSessionWithBrowser = async (
     if (typeof browserProcess.pid === "number") {
       await closeBrowserProcess(browserProcess.pid);
     }
+    await removeDirectoryBestEffort(sessionDir);
   }
 };
 

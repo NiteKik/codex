@@ -1,8 +1,10 @@
-import { Database } from "bun:sqlite";
+import BetterSqlite3, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { nowIso } from "../utils/time.js";
 import type {
   Account,
+  AccountProvisionSource,
+  AccountProvisionState,
   AccountStatus,
   DecisionLog,
   GatewayManagedToken,
@@ -81,6 +83,55 @@ const parseSubscriptionStatus = (value: unknown): SubscriptionStatus => {
   return "unknown";
 };
 
+const parseBoolean = (value: unknown, fallback = false) => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const text = toNullableText(value)?.trim().toLowerCase();
+  if (!text) {
+    return fallback;
+  }
+
+  if (text === "1" || text === "true" || text === "yes" || text === "on") {
+    return true;
+  }
+
+  if (text === "0" || text === "false" || text === "no" || text === "off") {
+    return false;
+  }
+
+  return fallback;
+};
+
+const parseProvisionSource = (value: unknown): AccountProvisionSource => {
+  const normalized = toNullableText(value)?.trim().toLowerCase();
+  if (
+    normalized === "manual" ||
+    normalized === "session-import" ||
+    normalized === "browser-capture" ||
+    normalized === "auto-register"
+  ) {
+    return normalized;
+  }
+
+  return "manual";
+};
+
+const parseProvisionState = (value: unknown): AccountProvisionState => {
+  const normalized = toNullableText(value)?.trim().toLowerCase();
+  if (
+    normalized === "idle" ||
+    normalized === "running" ||
+    normalized === "ready" ||
+    normalized === "failed"
+  ) {
+    return normalized;
+  }
+
+  return "idle";
+};
+
 const parseAccount = (row: Record<string, unknown>): Account => ({
   id: toText(row.id),
   name: toText(row.name),
@@ -88,6 +139,14 @@ const parseAccount = (row: Record<string, unknown>): Account => ({
   upstreamBaseUrl: toText(row.upstream_base_url),
   quotaPath: toText(row.quota_path),
   proxyPathPrefix: toText(row.proxy_path_prefix),
+  loginEmail: toNullableText(row.login_email),
+  loginPassword: toNullableText(row.login_password),
+  managedByGateway: parseBoolean(row.managed_by_gateway),
+  provisionSource: parseProvisionSource(row.provision_source),
+  provisionState: parseProvisionState(row.provision_state),
+  lastProvisionAttemptAt: toNullableText(row.last_provision_attempt_at),
+  lastProvisionedAt: toNullableText(row.last_provisioned_at),
+  lastProvisionError: toNullableText(row.last_provision_error),
   auth: JSON.parse(toText(row.auth_json)),
   workspace: {
     kind: parseWorkspaceKind(row.workspace_kind),
@@ -123,12 +182,12 @@ const parseGatewayManagedToken = (row: Record<string, unknown>): GatewayManagedT
 });
 
 export class GatewayDatabase {
-  readonly sqlite: Database;
+  readonly sqlite: BetterSqlite3Database;
 
   constructor(filePath: string) {
-    this.sqlite = new Database(filePath, { create: true });
-    this.sqlite.exec("PRAGMA journal_mode = WAL;");
-    this.sqlite.exec("PRAGMA foreign_keys = ON;");
+    this.sqlite = new BetterSqlite3(filePath);
+    this.sqlite.pragma("journal_mode = WAL");
+    this.sqlite.pragma("foreign_keys = ON");
   }
 
   init() {
@@ -141,36 +200,97 @@ export class GatewayDatabase {
   }
 
   private applyMigrations() {
-    const columns = this.sqlite
+    const accountColumns = this.sqlite
       .prepare("PRAGMA table_info(accounts)")
       .all() as Array<{ name?: unknown }>;
-    const existing = new Set(
-      columns
+    const existingAccountColumns = new Set(
+      accountColumns
         .map((column) => toNullableText(column.name)?.toLowerCase())
         .filter((value): value is string => Boolean(value)),
     );
 
-    if (!existing.has("workspace_kind")) {
+    if (!existingAccountColumns.has("workspace_kind")) {
       this.sqlite.exec(
         "ALTER TABLE accounts ADD COLUMN workspace_kind TEXT NOT NULL DEFAULT 'unknown'",
       );
     }
-    if (!existing.has("workspace_id")) {
+    if (!existingAccountColumns.has("login_email")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN login_email TEXT");
+    }
+    if (!existingAccountColumns.has("login_password")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN login_password TEXT");
+    }
+    if (!existingAccountColumns.has("managed_by_gateway")) {
+      this.sqlite.exec(
+        "ALTER TABLE accounts ADD COLUMN managed_by_gateway INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    if (!existingAccountColumns.has("provision_source")) {
+      this.sqlite.exec(
+        "ALTER TABLE accounts ADD COLUMN provision_source TEXT NOT NULL DEFAULT 'manual'",
+      );
+    }
+    if (!existingAccountColumns.has("provision_state")) {
+      this.sqlite.exec(
+        "ALTER TABLE accounts ADD COLUMN provision_state TEXT NOT NULL DEFAULT 'idle'",
+      );
+    }
+    if (!existingAccountColumns.has("last_provision_attempt_at")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN last_provision_attempt_at TEXT");
+    }
+    if (!existingAccountColumns.has("last_provisioned_at")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN last_provisioned_at TEXT");
+    }
+    if (!existingAccountColumns.has("last_provision_error")) {
+      this.sqlite.exec("ALTER TABLE accounts ADD COLUMN last_provision_error TEXT");
+    }
+    if (!existingAccountColumns.has("workspace_id")) {
       this.sqlite.exec("ALTER TABLE accounts ADD COLUMN workspace_id TEXT");
     }
-    if (!existing.has("workspace_name")) {
+    if (!existingAccountColumns.has("workspace_name")) {
       this.sqlite.exec("ALTER TABLE accounts ADD COLUMN workspace_name TEXT");
     }
-    if (!existing.has("workspace_headers_json")) {
+    if (!existingAccountColumns.has("workspace_headers_json")) {
       this.sqlite.exec("ALTER TABLE accounts ADD COLUMN workspace_headers_json TEXT");
     }
-    if (!existing.has("subscription_plan_type")) {
+    if (!existingAccountColumns.has("subscription_plan_type")) {
       this.sqlite.exec("ALTER TABLE accounts ADD COLUMN subscription_plan_type TEXT");
     }
-    if (!existing.has("subscription_status")) {
+    if (!existingAccountColumns.has("subscription_status")) {
       this.sqlite.exec(
         "ALTER TABLE accounts ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'unknown'",
       );
+    }
+
+    const requestLogColumns = this.sqlite
+      .prepare("PRAGMA table_info(request_logs)")
+      .all() as Array<{ name?: unknown }>;
+    const existingRequestLogColumns = new Set(
+      requestLogColumns
+        .map((column) => toNullableText(column.name)?.toLowerCase())
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    if (!existingRequestLogColumns.has("model")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN model TEXT");
+    }
+    if (!existingRequestLogColumns.has("input_tokens")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN input_tokens INTEGER");
+    }
+    if (!existingRequestLogColumns.has("output_tokens")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN output_tokens INTEGER");
+    }
+    if (!existingRequestLogColumns.has("reasoning_tokens")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER");
+    }
+    if (!existingRequestLogColumns.has("cached_input_tokens")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN cached_input_tokens INTEGER");
+    }
+    if (!existingRequestLogColumns.has("total_tokens")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN total_tokens INTEGER");
+    }
+    if (!existingRequestLogColumns.has("token_capture_source")) {
+      this.sqlite.exec("ALTER TABLE request_logs ADD COLUMN token_capture_source TEXT");
     }
   }
 
@@ -312,13 +432,19 @@ export class GatewayDatabase {
       .prepare(
         `
         INSERT INTO accounts (
-          id, name, provider, upstream_base_url, quota_path, proxy_path_prefix, auth_json,
+          id, name, provider, upstream_base_url, quota_path, proxy_path_prefix,
+          login_email, login_password, managed_by_gateway, provision_source, provision_state,
+          last_provision_attempt_at, last_provisioned_at, last_provision_error,
+          auth_json,
           workspace_kind, workspace_id, workspace_name, workspace_headers_json,
           subscription_plan_type, subscription_status,
           status, success_count, failure_count, consecutive_failures, consecutive_429,
           cooldown_until, last_error_code, last_error_message, created_at, updated_at
         ) VALUES (
-          @id, @name, @provider, @upstreamBaseUrl, @quotaPath, @proxyPathPrefix, @authJson,
+          @id, @name, @provider, @upstreamBaseUrl, @quotaPath, @proxyPathPrefix,
+          @loginEmail, @loginPassword, @managedByGateway, @provisionSource, @provisionState,
+          @lastProvisionAttemptAt, @lastProvisionedAt, @lastProvisionError,
+          @authJson,
           @workspaceKind, @workspaceId, @workspaceName, @workspaceHeadersJson,
           @subscriptionPlanType, @subscriptionStatus,
           @status, @successCount, @failureCount, @consecutiveFailures, @consecutive429,
@@ -330,6 +456,14 @@ export class GatewayDatabase {
           upstream_base_url = excluded.upstream_base_url,
           quota_path = excluded.quota_path,
           proxy_path_prefix = excluded.proxy_path_prefix,
+          login_email = excluded.login_email,
+          login_password = excluded.login_password,
+          managed_by_gateway = excluded.managed_by_gateway,
+          provision_source = excluded.provision_source,
+          provision_state = excluded.provision_state,
+          last_provision_attempt_at = excluded.last_provision_attempt_at,
+          last_provisioned_at = excluded.last_provisioned_at,
+          last_provision_error = excluded.last_provision_error,
           auth_json = excluded.auth_json,
           workspace_kind = excluded.workspace_kind,
           workspace_id = excluded.workspace_id,
@@ -349,31 +483,39 @@ export class GatewayDatabase {
         `,
       )
       .run({
-        "@id": account.id,
-        "@name": account.name,
-        "@provider": account.provider,
-        "@upstreamBaseUrl": account.upstreamBaseUrl,
-        "@quotaPath": account.quotaPath,
-        "@proxyPathPrefix": account.proxyPathPrefix,
-        "@authJson": JSON.stringify(account.auth),
-        "@workspaceKind": account.workspace.kind,
-        "@workspaceId": account.workspace.id,
-        "@workspaceName": account.workspace.name,
-        "@workspaceHeadersJson": account.workspace.headers
+        id: account.id,
+        name: account.name,
+        provider: account.provider,
+        upstreamBaseUrl: account.upstreamBaseUrl,
+        quotaPath: account.quotaPath,
+        proxyPathPrefix: account.proxyPathPrefix,
+        loginEmail: account.loginEmail,
+        loginPassword: account.loginPassword,
+        managedByGateway: account.managedByGateway ? 1 : 0,
+        provisionSource: account.provisionSource,
+        provisionState: account.provisionState,
+        lastProvisionAttemptAt: account.lastProvisionAttemptAt,
+        lastProvisionedAt: account.lastProvisionedAt,
+        lastProvisionError: account.lastProvisionError,
+        authJson: JSON.stringify(account.auth),
+        workspaceKind: account.workspace.kind,
+        workspaceId: account.workspace.id,
+        workspaceName: account.workspace.name,
+        workspaceHeadersJson: account.workspace.headers
           ? JSON.stringify(account.workspace.headers)
           : null,
-        "@subscriptionPlanType": account.subscription.planType,
-        "@subscriptionStatus": account.subscription.status,
-        "@status": account.status,
-        "@successCount": account.successCount,
-        "@failureCount": account.failureCount,
-        "@consecutiveFailures": account.consecutiveFailures,
-        "@consecutive429": account.consecutive429,
-        "@cooldownUntil": account.cooldownUntil,
-        "@lastErrorCode": account.lastErrorCode,
-        "@lastErrorMessage": account.lastErrorMessage,
-        "@createdAt": account.createdAt ?? timestamp,
-        "@updatedAt": account.updatedAt ?? timestamp,
+        subscriptionPlanType: account.subscription.planType,
+        subscriptionStatus: account.subscription.status,
+        status: account.status,
+        successCount: account.successCount,
+        failureCount: account.failureCount,
+        consecutiveFailures: account.consecutiveFailures,
+        consecutive429: account.consecutive429,
+        cooldownUntil: account.cooldownUntil,
+        lastErrorCode: account.lastErrorCode,
+        lastErrorMessage: account.lastErrorMessage,
+        createdAt: account.createdAt ?? timestamp,
+        updatedAt: account.updatedAt ?? timestamp,
       });
   }
 
@@ -698,8 +840,10 @@ export class GatewayDatabase {
         `
         INSERT INTO request_logs (
           request_id, session_id, account_id, path, method, attempt, estimated_units,
-          upstream_status, error_code, error_message, duration_ms, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          upstream_status, error_code, error_message, duration_ms, started_at, finished_at,
+          model, input_tokens, output_tokens, reasoning_tokens, cached_input_tokens, total_tokens,
+          token_capture_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
       .run(
@@ -716,6 +860,13 @@ export class GatewayDatabase {
         entry.durationMs,
         entry.startedAt,
         entry.finishedAt,
+        entry.model,
+        entry.inputTokens,
+        entry.outputTokens,
+        entry.reasoningTokens,
+        entry.cachedInputTokens,
+        entry.totalTokens,
+        entry.tokenCaptureSource,
       );
   }
 
@@ -744,10 +895,128 @@ export class GatewayDatabase {
       );
   }
 
+  updateRequestTokenUsage(
+    requestId: string,
+    usage: {
+      model: string | null;
+      inputTokens: number | null;
+      outputTokens: number | null;
+      reasoningTokens: number | null;
+      cachedInputTokens: number | null;
+      totalTokens: number | null;
+      captureSource: "json" | "sse";
+    },
+  ) {
+    this.sqlite
+      .prepare(
+        `
+        UPDATE request_logs
+        SET
+          model = ?,
+          input_tokens = ?,
+          output_tokens = ?,
+          reasoning_tokens = ?,
+          cached_input_tokens = ?,
+          total_tokens = ?,
+          token_capture_source = ?
+        WHERE request_id = ?
+        `,
+      )
+      .run(
+        usage.model,
+        usage.inputTokens,
+        usage.outputTokens,
+        usage.reasoningTokens,
+        usage.cachedInputTokens,
+        usage.totalTokens,
+        usage.captureSource,
+        requestId,
+      );
+  }
+
   listRecentRequestLogs(limit = 25) {
     return this.sqlite
       .prepare("SELECT * FROM request_logs ORDER BY started_at DESC LIMIT ?")
       .all(limit);
+  }
+
+  summarizeRequestTokenUsage(hours?: number | null) {
+    const since =
+      typeof hours === "number" && Number.isFinite(hours) && hours > 0
+        ? new Date(Date.now() - hours * 60 * 60_000).toISOString()
+        : null;
+    const params = since ? [since] : [];
+    const timeFilter = since ? "AND started_at >= ?" : "";
+    const row = this.sqlite
+      .prepare(
+        `
+        SELECT
+          COUNT(*) as request_count,
+          COUNT(
+            CASE
+              WHEN total_tokens IS NOT NULL OR input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+                THEN 1
+            END
+          ) as requests_with_usage_count,
+          COALESCE(SUM(input_tokens), 0) as input_tokens,
+          COALESCE(SUM(output_tokens), 0) as output_tokens,
+          COALESCE(SUM(reasoning_tokens), 0) as reasoning_tokens,
+          COALESCE(SUM(cached_input_tokens), 0) as cached_input_tokens,
+          COALESCE(SUM(total_tokens), 0) as total_tokens
+        FROM request_logs
+        WHERE upstream_status IS NOT NULL AND upstream_status < 400
+          ${timeFilter}
+        `,
+      )
+      .get(...params) as Record<string, unknown>;
+
+    return {
+      requestCount: Number(row.request_count ?? 0),
+      requestsWithUsageCount: Number(row.requests_with_usage_count ?? 0),
+      inputTokens: Number(row.input_tokens ?? 0),
+      outputTokens: Number(row.output_tokens ?? 0),
+      reasoningTokens: Number(row.reasoning_tokens ?? 0),
+      cachedInputTokens: Number(row.cached_input_tokens ?? 0),
+      totalTokens: Number(row.total_tokens ?? 0),
+    };
+  }
+
+  summarizeRequestTokenUsageByPlan(hours?: number | null) {
+    const since =
+      typeof hours === "number" && Number.isFinite(hours) && hours > 0
+        ? new Date(Date.now() - hours * 60 * 60_000).toISOString()
+        : null;
+    const params = since ? [since] : [];
+    const timeFilter = since ? "AND request_logs.started_at >= ?" : "";
+
+    return this.sqlite
+      .prepare(
+        `
+        SELECT
+          accounts.subscription_plan_type as plan_type,
+          COUNT(*) as request_count,
+          COUNT(
+            CASE
+              WHEN request_logs.total_tokens IS NOT NULL
+                OR request_logs.input_tokens IS NOT NULL
+                OR request_logs.output_tokens IS NOT NULL
+                THEN 1
+            END
+          ) as requests_with_usage_count,
+          COALESCE(SUM(request_logs.input_tokens), 0) as input_tokens,
+          COALESCE(SUM(request_logs.output_tokens), 0) as output_tokens,
+          COALESCE(SUM(request_logs.reasoning_tokens), 0) as reasoning_tokens,
+          COALESCE(SUM(request_logs.cached_input_tokens), 0) as cached_input_tokens,
+          COALESCE(SUM(request_logs.total_tokens), 0) as total_tokens
+        FROM request_logs
+        INNER JOIN accounts ON accounts.id = request_logs.account_id
+        WHERE request_logs.upstream_status IS NOT NULL AND request_logs.upstream_status < 400
+          ${timeFilter}
+        GROUP BY accounts.subscription_plan_type
+        ORDER BY request_count DESC, total_tokens DESC
+        `,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
   }
 
   listRecentDecisionLogs(limit = 25) {

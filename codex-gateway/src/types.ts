@@ -1,8 +1,15 @@
 export type AccountStatus = "healthy" | "exhausted" | "cooling" | "invalid";
+export type AccountProvisionSource =
+  | "manual"
+  | "session-import"
+  | "browser-capture"
+  | "auto-register";
+export type AccountProvisionState = "idle" | "running" | "ready" | "failed";
 
 export type AuthMode = "bearer" | "static-headers";
 export type WorkspaceKind = "personal" | "team" | "unknown";
 export type SubscriptionStatus = "active" | "trial" | "inactive" | "unknown";
+export type SubscriptionPlanBucket = "free" | "plus" | "team" | "pro" | "unknown";
 
 export interface AuthConfig {
   mode: AuthMode;
@@ -20,6 +27,16 @@ export interface WorkspaceContext {
 export interface SubscriptionContext {
   planType: string | null;
   status: SubscriptionStatus;
+}
+
+export interface RequestTokenUsage {
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  cachedInputTokens: number | null;
+  totalTokens: number | null;
+  captureSource: "json" | "sse";
 }
 
 export interface GatewayManagedToken {
@@ -40,6 +57,14 @@ export interface Account {
   upstreamBaseUrl: string;
   quotaPath: string;
   proxyPathPrefix: string;
+  loginEmail: string | null;
+  loginPassword: string | null;
+  managedByGateway: boolean;
+  provisionSource: AccountProvisionSource;
+  provisionState: AccountProvisionState;
+  lastProvisionAttemptAt: string | null;
+  lastProvisionedAt: string | null;
+  lastProvisionError: string | null;
   auth: AuthConfig;
   workspace: WorkspaceContext;
   subscription: SubscriptionContext;
@@ -119,6 +144,13 @@ export interface RequestLog {
   durationMs: number | null;
   startedAt: string;
   finishedAt: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  cachedInputTokens: number | null;
+  totalTokens: number | null;
+  tokenCaptureSource: "json" | "sse" | null;
 }
 
 export interface DecisionLog {
@@ -152,6 +184,41 @@ export interface VirtualQuotaPool {
   window5hTotal: number;
   window5hUsed: number;
   window5hRemaining: number;
+}
+
+export interface PlanQuotaPool {
+  planBucket: SubscriptionPlanBucket;
+  planLabel: string;
+  accountCount: number;
+  routableAccountCount: number;
+  healthyAccountCount: number;
+  coolingAccountCount: number;
+  exhaustedAccountCount: number;
+  invalidAccountCount: number;
+  weeklyTotal: number;
+  weeklyUsed: number;
+  weeklyRemaining: number;
+  weeklyRemainingRatio: number;
+  window5hTotal: number;
+  window5hUsed: number;
+  window5hRemaining: number;
+  window5hRemainingRatio: number;
+  latestSampleTime: string | null;
+}
+
+export interface TokenUsageSummary {
+  requestCount: number;
+  requestsWithUsageCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+}
+
+export interface PlanTokenUsageSummary extends TokenUsageSummary {
+  planBucket: SubscriptionPlanBucket;
+  planLabel: string;
 }
 
 export interface ScoreBreakdown {

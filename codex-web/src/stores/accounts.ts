@@ -1,97 +1,88 @@
 import { defineStore } from "pinia";
-import {
-  fetchAccounts,
-  fetchHealth,
-  triggerQuotaPoll,
-  type AccountRow,
-} from "../services/gateway-api.ts";
+import { ref } from "vue";
+import { fetchAccounts, triggerQuotaPoll, type AccountRow } from "../services/gateway-api.ts";
 
-export type AccountsStatusTone = "healthy" | "warning" | "critical" | "idle";
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : fallback;
 
-type AccountsState = {
-  accounts: AccountRow[];
-  statusTone: AccountsStatusTone;
-  statusLabel: string;
-  lastSync: string;
-  errorMessage: string;
-  refreshing: boolean;
-  refreshTimerId: number | null;
-};
+export const useAccountsStore = defineStore("accounts", () => {
+  const accounts = ref<AccountRow[]>([]);
+  const errorMessage = ref("");
+  const refreshing = ref(false);
 
-export const useAccountsStore = defineStore("accounts", {
-  state: (): AccountsState => ({
-    accounts: [],
-    statusTone: "idle",
-    statusLabel: "未连接",
-    lastSync: "尚未同步",
-    errorMessage: "",
-    refreshing: false,
-    refreshTimerId: null,
-  }),
-  actions: {
-    async refreshAccounts() {
-      if (this.refreshing) {
-        return;
-      }
+  let refreshTimerId: number | null = null;
+  let refreshTask: Promise<void> | null = null;
 
-      this.refreshing = true;
-      this.errorMessage = "";
+  const refreshAccounts = () => {
+    if (refreshTask) {
+      return refreshTask;
+    }
+
+    refreshTask = (async () => {
+      refreshing.value = true;
+      errorMessage.value = "";
 
       try {
-        const [health, nextAccounts] = await Promise.all([
-          fetchHealth(),
-          fetchAccounts(),
-        ]);
-        this.accounts = nextAccounts;
-        this.statusTone = health.ok ? "healthy" : "warning";
-        this.statusLabel = health.ok ? "已连接" : "异常";
-        this.lastSync = `最近同步 ${new Date().toLocaleString("zh-CN")}`;
+        accounts.value = await fetchAccounts();
       } catch (error) {
-        this.statusTone = "critical";
-        this.statusLabel = "连接失败";
-        this.errorMessage =
-          error instanceof Error ? error.message : "账号池加载失败。";
+        errorMessage.value = getErrorMessage(error, "账号池加载失败。");
       } finally {
-        this.refreshing = false;
+        refreshing.value = false;
       }
-    },
-    async pollNow() {
-      if (this.refreshing) {
-        return;
-      }
+    })().finally(() => {
+      refreshTask = null;
+    });
 
-      this.refreshing = true;
-      this.errorMessage = "";
+    return refreshTask;
+  };
 
-      try {
-        await triggerQuotaPoll();
-      } catch (error) {
-        this.statusTone = "critical";
-        this.statusLabel = "采集失败";
-        this.errorMessage =
-          error instanceof Error ? error.message : "手动采集失败。";
-        this.refreshing = false;
-        return;
-      }
+  const pollNow = async () => {
+    if (refreshing.value) {
+      return;
+    }
 
-      this.refreshing = false;
-      await this.refreshAccounts();
-    },
-    startAutoRefresh(intervalMs = 30_000) {
-      if (this.refreshTimerId !== null) {
-        return;
-      }
+    refreshing.value = true;
+    errorMessage.value = "";
 
-      void this.refreshAccounts();
-      this.refreshTimerId = window.setInterval(() => {
-        void this.refreshAccounts();
-      }, intervalMs);
-    },
-    stopAutoRefresh() {
-      if (this.refreshTimerId !== null) {
-        window.clearInterval(this.refreshTimerId);
-        this.refreshTimerId = null;
-      }
-    },
-  },
+    try {
+      await triggerQuotaPoll();
+    } catch (error) {
+      errorMessage.value = getErrorMessage(error, "手动采集失败。");
+      refreshing.value = false;
+      return;
+    }
+
+    refreshing.value = false;
+    await refreshAccounts();
+  };
+
+  const startAutoRefresh = (intervalMs = 30_000) => {
+    if (refreshTimerId !== null) {
+      return;
+    }
+
+    void refreshAccounts();
+    refreshTimerId = window.setInterval(() => {
+      void refreshAccounts();
+    }, intervalMs);
+  };
+
+  const stopAutoRefresh = () => {
+    if (refreshTimerId === null) {
+      return;
+    }
+
+    window.clearInterval(refreshTimerId);
+    refreshTimerId = null;
+  };
+
+  return {
+    accounts,
+    errorMessage,
+    pollNow,
+    refreshAccounts,
+    refreshing,
+    startAutoRefresh,
+    stopAutoRefresh,
+  };
 });

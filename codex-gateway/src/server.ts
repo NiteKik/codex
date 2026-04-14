@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import Fastify from "fastify";
 import { AccountManager } from "./accounts/account-manager.js";
 import { GatewayTokenManager } from "./auth/gateway-token-manager.js";
@@ -8,12 +9,21 @@ import {
   CdkActivationService,
   type CdkActivationResult,
 } from "./integrations/cdk-activation-service.js";
+import { AccountAutoRegisterReplenisher } from "./integrations/account-auto-register-replenisher.js";
 import { ChatgptCaptureManager } from "./integrations/chatgpt-capture-manager.js";
+import { CodexConfigAutoManager } from "./integrations/codex-config-auto-manager.js";
+import { ChatgptRegistrationManager } from "./integrations/chatgpt-registration-manager.js";
+import { ChatgptSessionRefreshManager } from "./integrations/chatgpt-session-refresh-manager.js";
 import { GenericHttpProvider } from "./providers/generic-http-provider.js";
 import { createMockUpstreamServer } from "./providers/mock-upstream.js";
 import { ProxyService } from "./proxy/proxy-service.js";
 import { QuotaPoller } from "./quota/quota-poller.js";
 import { QuotaVirtualizer } from "./quota/quota-virtualizer.js";
+import {
+  accountAutomationRanges,
+  getAccountAutomationSettings,
+  updateAccountAutomationSettings,
+} from "./runtime-settings.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import { SessionManager } from "./session/session-manager.js";
 import type {
@@ -508,6 +518,11 @@ const parseAccountPayload = (
   | "upstreamBaseUrl"
   | "quotaPath"
   | "proxyPathPrefix"
+  | "loginEmail"
+  | "loginPassword"
+  | "managedByGateway"
+  | "provisionSource"
+  | "provisionState"
   | "auth"
   | "workspace"
   | "status"
@@ -530,6 +545,21 @@ const parseAccountPayload = (
     throw new Error('Field "auth" is required.');
   }
   const workspace = parseWorkspacePayload(body, existing?.workspace ?? null);
+  const loginEmail = readNullableOptionalString(body, "loginEmail", existing?.loginEmail ?? null);
+  const loginPassword = readNullableOptionalString(
+    body,
+    "loginPassword",
+    existing?.loginPassword ?? null,
+  );
+  const managedByGateway = parseOptionalBoolean(
+    body,
+    "managedByGateway",
+    existing?.managedByGateway ?? false,
+  );
+  const provisionSource =
+    readOptionalString(body, "provisionSource", existing?.provisionSource ?? "manual") || "manual";
+  const provisionState =
+    readOptionalString(body, "provisionState", existing?.provisionState ?? "ready") || "ready";
 
   return {
     id: readRequiredString(body, "id"),
@@ -546,6 +576,21 @@ const parseAccountPayload = (
       "proxyPathPrefix",
       existing?.proxyPathPrefix ?? defaults.proxyPathPrefix,
     ),
+    loginEmail,
+    loginPassword,
+    managedByGateway,
+    provisionSource:
+      provisionSource === "session-import" ||
+      provisionSource === "browser-capture" ||
+      provisionSource === "auto-register"
+        ? provisionSource
+        : "manual",
+    provisionState:
+      provisionState === "idle" ||
+      provisionState === "running" ||
+      provisionState === "failed"
+        ? provisionState
+        : "ready",
     auth,
     workspace,
     status,
@@ -577,8 +622,35 @@ export const createGatewayRuntime = () => {
     config.preemptiveWindowReserveUnits,
   );
   const configuredPollIntervalMs = db.getPollIntervalMs() ?? config.pollIntervalMs;
-  const poller = new QuotaPoller(db, accountManager, provider, configuredPollIntervalMs);
+  const sessionRefreshManager = new ChatgptSessionRefreshManager(
+    join(config.browserProfileDir, "managed-refresh"),
+    db,
+    accountManager,
+  );
+  const poller = new QuotaPoller(
+    db,
+    accountManager,
+    provider,
+    configuredPollIntervalMs,
+    sessionRefreshManager,
+  );
   const chatgptCaptureManager = new ChatgptCaptureManager(config.browserProfileDir);
+  const chatgptRegistrationManager = new ChatgptRegistrationManager(
+    join(config.browserProfileDir, "managed-register"),
+    db,
+    accountManager,
+    provider,
+  );
+  const codexConfigAutoManager = new CodexConfigAutoManager(db, {
+    gatewayPort: config.gatewayPort,
+    gatewayWorkingDir: process.cwd(),
+  });
+  codexConfigAutoManager.initialize();
+  const autoRegisterReplenisher = new AccountAutoRegisterReplenisher(
+    db,
+    accountManager,
+    chatgptRegistrationManager,
+  );
   const cdkActivationService = new CdkActivationService({
     cdkFilePath: config.cdkFilePath,
     activationBaseUrl: config.cdkActivationBaseUrl,
@@ -592,6 +664,7 @@ export const createGatewayRuntime = () => {
     scheduler,
     sessionManager,
     quotaVirtualizer,
+    sessionRefreshManager,
   );
   const serializeAccount = (accountId: string) => {
     const account = accountManager.getAccount(accountId);
@@ -599,11 +672,73 @@ export const createGatewayRuntime = () => {
       throw new Error(`Account not found: ${accountId}`);
     }
 
+    const { loginPassword: _loginPassword, ...safeAccount } = account;
+
     return {
-      ...account,
+      ...safeAccount,
+      hasStoredPassword: Boolean(account.loginPassword),
       auth: sanitizeAuthForAdmin(account.auth),
       quota: quotaVirtualizer.getAccountQuotaState(account.id),
     };
+  };
+
+  const refreshQuotaForAccount = async (accountId: string, reason: string) => {
+    const account = accountManager.getAccount(accountId);
+    if (!account) {
+      return;
+    }
+
+    try {
+      const snapshot = await provider.fetchQuota(account);
+      const workspaceUpdated = accountManager.mergeWorkspaceHint(accountId, snapshot.workspaceHint);
+      const subscriptionUpdated = accountManager.mergeSubscriptionHint(
+        accountId,
+        snapshot.subscriptionHint,
+      );
+      accountManager.applyQuotaSnapshot({
+        ...snapshot,
+        source: "manual",
+      });
+      db.logRuntime({
+        level: "info",
+        scope: "cdk-activation",
+        event: "activation.quota_refresh",
+        message: "Post-upgrade quota refresh succeeded",
+        accountId,
+        detailsJson: JSON.stringify({
+          reason,
+          weeklyTotal: snapshot.weeklyTotal,
+          weeklyUsed: snapshot.weeklyUsed,
+          window5hTotal: snapshot.window5hTotal,
+          window5hUsed: snapshot.window5hUsed,
+          sampleTime: snapshot.sampleTime,
+          workspaceUpdated,
+          subscriptionUpdated,
+        }),
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      db.logRuntime({
+        level: "warn",
+        scope: "cdk-activation",
+        event: "activation.quota_refresh_failed",
+        message: error instanceof Error ? error.message : "Post-upgrade quota refresh failed.",
+        accountId,
+        detailsJson: JSON.stringify({
+          reason,
+        }),
+        createdAt: new Date().toISOString(),
+      });
+    }
+  };
+
+  const schedulePostUpgradeQuotaRefresh = (accountId: string) => {
+    const followUpDelayMs = [15_000, 60_000];
+    for (const delayMs of followUpDelayMs) {
+      setTimeout(() => {
+        void refreshQuotaForAccount(accountId, `cdk-upgrade+${Math.floor(delayMs / 1000)}s`);
+      }, delayMs);
+    }
   };
 
   if (config.enableDemoSeeds) {
@@ -620,6 +755,20 @@ export const createGatewayRuntime = () => {
     logger: false,
     bodyLimit: 10 * 1024 * 1024,
   });
+
+  const shouldRequireGatewayAccessToken = () => {
+    if (!config.requireGatewayAccessToken) {
+      return false;
+    }
+    const status = codexConfigAutoManager.getStatus();
+    if (!status.enabled) {
+      return true;
+    }
+    return !(
+      status.resolvedMode === "openai_base_url" ||
+      status.resolvedMode === "openai_base_url_no_forced"
+    );
+  };
 
   app.addHook("onRequest", (request, reply, done) => {
     reply.header("Access-Control-Allow-Origin", "*");
@@ -647,7 +796,7 @@ export const createGatewayRuntime = () => {
       return;
     }
 
-    if (!config.requireGatewayAccessToken || !isGatewayProtectedPath(request.url)) {
+    if (!shouldRequireGatewayAccessToken() || !isGatewayProtectedPath(request.url)) {
       done();
       return;
     }
@@ -675,6 +824,7 @@ export const createGatewayRuntime = () => {
 
   app.get("/admin/settings", async () => {
     const intervalMs = poller.getIntervalMs();
+    const automationSettings = getAccountAutomationSettings(db);
     return {
       ok: true,
       pollIntervalMs: intervalMs,
@@ -683,12 +833,33 @@ export const createGatewayRuntime = () => {
         minSeconds: pollIntervalMinSeconds,
         maxSeconds: pollIntervalMaxSeconds,
       },
+      tempMailBaseUrl: automationSettings.tempMailBaseUrl,
+      tempMailAdminPassword: automationSettings.tempMailAdminPassword,
+      tempMailSitePassword: automationSettings.tempMailSitePassword,
+      tempMailDefaultDomain: automationSettings.tempMailDefaultDomain,
+      managedBrowserExecutablePath: automationSettings.managedBrowserExecutablePath,
+      autoRegisterEnabled: automationSettings.autoRegisterEnabled,
+      enableFreeAccountScheduling: automationSettings.enableFreeAccountScheduling,
+      autoRegisterThreshold: automationSettings.autoRegisterThreshold,
+      autoRegisterBatchSize: automationSettings.autoRegisterBatchSize,
+      autoRegisterCheckIntervalSeconds: Math.floor(
+        automationSettings.autoRegisterCheckIntervalMs / 1000,
+      ),
+      autoRegisterTimeoutSeconds: Math.floor(automationSettings.autoRegisterTimeoutMs / 1000),
+      autoRegisterHeadless: automationSettings.autoRegisterHeadless,
+      autoRegisterRanges: {
+        threshold: accountAutomationRanges.threshold,
+        batchSize: accountAutomationRanges.batchSize,
+        checkIntervalSeconds: accountAutomationRanges.checkIntervalSeconds,
+        timeoutSeconds: accountAutomationRanges.timeoutSeconds,
+      },
     };
   });
 
   app.put("/admin/settings", async (request, reply) => {
     try {
       const body = isRecord(request.body) ? request.body : {};
+      const currentSettings = getAccountAutomationSettings(db);
       const pollIntervalSeconds = parseRequiredPollIntervalSeconds(
         body,
         "pollIntervalSeconds",
@@ -698,11 +869,114 @@ export const createGatewayRuntime = () => {
       const pollIntervalMs = pollIntervalSeconds * 1000;
       db.setPollIntervalMs(pollIntervalMs);
       poller.setIntervalMs(pollIntervalMs);
+      const tempMailBaseUrl = readOptionalString(
+        body,
+        "tempMailBaseUrl",
+        currentSettings.tempMailBaseUrl,
+      );
+      const tempMailAdminPassword = readOptionalString(
+        body,
+        "tempMailAdminPassword",
+        currentSettings.tempMailAdminPassword,
+      );
+      const tempMailSitePassword = readOptionalString(
+        body,
+        "tempMailSitePassword",
+        currentSettings.tempMailSitePassword,
+      );
+      const tempMailDefaultDomain = readOptionalString(
+        body,
+        "tempMailDefaultDomain",
+        currentSettings.tempMailDefaultDomain,
+      );
+      const managedBrowserExecutablePath = readOptionalString(
+        body,
+        "managedBrowserExecutablePath",
+        currentSettings.managedBrowserExecutablePath,
+      );
+      const autoRegisterEnabled = parseOptionalBoolean(
+        body,
+        "autoRegisterEnabled",
+        currentSettings.autoRegisterEnabled,
+      );
+      const enableFreeAccountScheduling = parseOptionalBoolean(
+        body,
+        "enableFreeAccountScheduling",
+        currentSettings.enableFreeAccountScheduling,
+      );
+      const autoRegisterHeadless = parseOptionalBoolean(
+        body,
+        "autoRegisterHeadless",
+        currentSettings.autoRegisterHeadless,
+      );
+      const autoRegisterThreshold = readOptionalPositiveInt(
+        body,
+        "autoRegisterThreshold",
+        currentSettings.autoRegisterThreshold,
+        accountAutomationRanges.threshold.max,
+      );
+      const autoRegisterBatchSize = readOptionalPositiveInt(
+        body,
+        "autoRegisterBatchSize",
+        currentSettings.autoRegisterBatchSize,
+        accountAutomationRanges.batchSize.max,
+      );
+      const autoRegisterCheckIntervalSeconds = readOptionalPositiveInt(
+        body,
+        "autoRegisterCheckIntervalSeconds",
+        Math.floor(currentSettings.autoRegisterCheckIntervalMs / 1000),
+        accountAutomationRanges.checkIntervalSeconds.max,
+      );
+      const autoRegisterTimeoutSeconds = readOptionalPositiveInt(
+        body,
+        "autoRegisterTimeoutSeconds",
+        Math.floor(currentSettings.autoRegisterTimeoutMs / 1000),
+        accountAutomationRanges.timeoutSeconds.max,
+      );
+      const automationSettings = updateAccountAutomationSettings(db, {
+        tempMailBaseUrl,
+        tempMailAdminPassword,
+        tempMailSitePassword,
+        tempMailDefaultDomain,
+        managedBrowserExecutablePath,
+        autoRegisterEnabled,
+        enableFreeAccountScheduling,
+        autoRegisterThreshold: Math.max(
+          accountAutomationRanges.threshold.min,
+          autoRegisterThreshold,
+        ),
+        autoRegisterBatchSize: Math.max(accountAutomationRanges.batchSize.min, autoRegisterBatchSize),
+        autoRegisterCheckIntervalMs: Math.max(
+          accountAutomationRanges.checkIntervalSeconds.min * 1000,
+          autoRegisterCheckIntervalSeconds * 1000,
+        ),
+        autoRegisterTimeoutMs: Math.max(
+          accountAutomationRanges.timeoutSeconds.min * 1000,
+          autoRegisterTimeoutSeconds * 1000,
+        ),
+        autoRegisterHeadless,
+      });
+      autoRegisterReplenisher.start();
+      void autoRegisterReplenisher.runOnce("settings");
 
       return {
         ok: true,
         pollIntervalMs,
         pollIntervalSeconds,
+        tempMailBaseUrl: automationSettings.tempMailBaseUrl,
+        tempMailAdminPassword: automationSettings.tempMailAdminPassword,
+        tempMailSitePassword: automationSettings.tempMailSitePassword,
+        tempMailDefaultDomain: automationSettings.tempMailDefaultDomain,
+        managedBrowserExecutablePath: automationSettings.managedBrowserExecutablePath,
+        autoRegisterEnabled: automationSettings.autoRegisterEnabled,
+        enableFreeAccountScheduling: automationSettings.enableFreeAccountScheduling,
+        autoRegisterThreshold: automationSettings.autoRegisterThreshold,
+        autoRegisterBatchSize: automationSettings.autoRegisterBatchSize,
+        autoRegisterCheckIntervalSeconds: Math.floor(
+          automationSettings.autoRegisterCheckIntervalMs / 1000,
+        ),
+        autoRegisterTimeoutSeconds: Math.floor(automationSettings.autoRegisterTimeoutMs / 1000),
+        autoRegisterHeadless: automationSettings.autoRegisterHeadless,
       };
     } catch (error) {
       return reply.status(400).send({
@@ -712,9 +986,53 @@ export const createGatewayRuntime = () => {
     }
   });
 
+  app.get("/admin/codex-auto-config", async () => {
+    return {
+      ok: true,
+      ...codexConfigAutoManager.getStatus(),
+    };
+  });
+
+  app.put("/admin/codex-auto-config", async (request, reply) => {
+    try {
+      const body = isRecord(request.body) ? request.body : {};
+      if (!hasOwn(body, "enabled")) {
+        throw new Error('Field "enabled" is required.');
+      }
+
+      if (hasOwn(body, "mode")) {
+        const mode = String(body.mode);
+        if (
+          mode !== "provider_auth" &&
+          mode !== "provider_env" &&
+          mode !== "openai_base_url" &&
+          mode !== "openai_base_url_no_forced"
+        ) {
+          throw new Error(
+            'Field "mode" must be "provider_auth", "provider_env", "openai_base_url", or "openai_base_url_no_forced".',
+          );
+        }
+        codexConfigAutoManager.setMode(mode);
+      }
+
+      const enabled = parseOptionalBoolean(body, "enabled", false);
+      const status = codexConfigAutoManager.setEnabled(enabled);
+      return {
+        ok: true,
+        ...status,
+      };
+    } catch (error) {
+      return reply.status(400).send({
+        error: "invalid_codex_auto_config_payload",
+        message: error instanceof Error ? error.message : "Invalid codex auto-config payload.",
+      });
+    }
+  });
+
   app.get("/admin/access-token", async () => {
     const baseUrl = `http://127.0.0.1:${config.gatewayPort}`;
     const envVarName = "QUOTA_GATEWAY_TOKEN";
+    const requireGatewayAccessToken = shouldRequireGatewayAccessToken();
     const codexConfigSnippet = [
       'model_provider = "quota_gateway"',
       "",
@@ -736,7 +1054,7 @@ export const createGatewayRuntime = () => {
 
     return {
       ok: true,
-      required: config.requireGatewayAccessToken,
+      required: requireGatewayAccessToken,
       token: config.gatewayAccessToken,
       tokenPreview: GatewayTokenManager.buildTokenPreview(config.gatewayAccessToken),
       source: config.gatewayAccessTokenSource,
@@ -750,7 +1068,7 @@ export const createGatewayRuntime = () => {
       codexConfigSnippet,
       providerConfigSnippet: codexConfigSnippet,
       openaiBaseUrlConfigSnippet: openaiBaseUrlSnippet,
-      openaiBaseUrlCompatible: !config.requireGatewayAccessToken,
+      openaiBaseUrlCompatible: !requireGatewayAccessToken,
       strategyDiff: {
         providerMode: "需要通过 env_key 提供 token；会切换到自定义 provider 命名空间。",
         openaiBaseUrlMode:
@@ -879,8 +1197,18 @@ export const createGatewayRuntime = () => {
         });
       }
 
+      const sessionInfoFromBody =
+        readNullableOptionalString(body, "sessionInfo", null) ??
+        readNullableOptionalString(body, "session_info", null);
+
       accountManager.upsertAccount({
         ...payload,
+        provisionSource:
+          sessionInfoFromBody ? "session-import" : payload.provisionSource,
+        provisionState: "ready",
+        lastProvisionAttemptAt: new Date().toISOString(),
+        lastProvisionedAt: new Date().toISOString(),
+        lastProvisionError: null,
         subscription: {
           planType: null,
           status: "unknown",
@@ -893,10 +1221,6 @@ export const createGatewayRuntime = () => {
         lastErrorCode: null,
         lastErrorMessage: null,
       });
-
-      const sessionInfoFromBody =
-        readNullableOptionalString(body, "sessionInfo", null) ??
-        readNullableOptionalString(body, "session_info", null);
       if (sessionInfoFromBody) {
         db.setRuntimeSetting(accountSessionInfoSettingKey(payload.id), sessionInfoFromBody);
       }
@@ -1034,6 +1358,14 @@ export const createGatewayRuntime = () => {
         upstreamBaseUrl,
         quotaPath,
         proxyPathPrefix,
+        loginEmail: captureResult.email,
+        loginPassword: existing?.loginPassword ?? null,
+        managedByGateway: existing?.managedByGateway ?? false,
+        provisionSource: "browser-capture",
+        provisionState: "ready",
+        lastProvisionAttemptAt: captureResult.capturedAt,
+        lastProvisionedAt: captureResult.capturedAt,
+        lastProvisionError: null,
         auth: {
           mode: "bearer",
           token: captureResult.accessToken,
@@ -1127,6 +1459,74 @@ export const createGatewayRuntime = () => {
         message: error instanceof Error ? error.message : "Invalid save payload.",
       });
     }
+  });
+
+  app.post("/admin/chatgpt-register/start", async (request, reply) => {
+    try {
+      const body = isRecord(request.body) ? request.body : {};
+      const settings = getAccountAutomationSettings(db);
+      const timeoutMs =
+        readOptionalPositiveInt(
+          body,
+          "timeoutMs",
+          Math.floor(settings.autoRegisterTimeoutMs),
+          accountAutomationRanges.timeoutSeconds.max * 1000,
+        ) || settings.autoRegisterTimeoutMs;
+      const headless = parseOptionalBoolean(body, "headless", settings.autoRegisterHeadless);
+      const browserExecutablePath = readOptionalString(
+        body,
+        "browserExecutablePath",
+        settings.managedBrowserExecutablePath,
+      );
+      const task = chatgptRegistrationManager.startRegistration({
+        trigger: "manual",
+        timeoutMs: Math.max(accountAutomationRanges.timeoutSeconds.min * 1000, timeoutMs),
+        headless,
+        browserExecutablePath: browserExecutablePath || undefined,
+      });
+
+      return reply.status(202).send({
+        ok: true,
+        task,
+      });
+    } catch (error) {
+      return reply.status(400).send({
+        error: "invalid_register_payload",
+        message: error instanceof Error ? error.message : "自动注册任务启动失败。",
+      });
+    }
+  });
+
+  app.get("/admin/chatgpt-register/:taskId", async (request, reply) => {
+    const taskId = (request.params as { taskId: string }).taskId;
+    const task = chatgptRegistrationManager.getTask(taskId);
+    if (!task) {
+      return reply.status(404).send({
+        error: "register_task_not_found",
+        message: `Register task ${taskId} does not exist.`,
+      });
+    }
+
+    return {
+      ok: true,
+      task,
+    };
+  });
+
+  app.post("/admin/chatgpt-register/:taskId/cancel", async (request, reply) => {
+    const taskId = (request.params as { taskId: string }).taskId;
+    const task = await chatgptRegistrationManager.cancelTask(taskId);
+    if (!task) {
+      return reply.status(404).send({
+        error: "register_task_not_found",
+        message: `Register task ${taskId} does not exist.`,
+      });
+    }
+
+    return {
+      ok: true,
+      task,
+    };
   });
 
   app.put("/admin/accounts/:accountId", async (request, reply) => {
@@ -1268,6 +1668,9 @@ export const createGatewayRuntime = () => {
           status: "active",
         });
       }
+
+      await refreshQuotaForAccount(accountId, "cdk-upgrade-immediate");
+      schedulePostUpgradeQuotaRefresh(accountId);
 
       const remainingCdks = await cdkActivationService.countAvailableCdks(activation.productType);
 
@@ -1417,6 +1820,8 @@ export const createGatewayRuntime = () => {
 
   return {
     app,
+    autoRegisterReplenisher,
+    codexConfigAutoManager,
     db,
     poller,
     mockUpstream,

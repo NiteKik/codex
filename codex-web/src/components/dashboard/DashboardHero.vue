@@ -20,39 +20,47 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section class="dashboard-hero dashboard-hero__copy">
-    <span class="dashboard-kicker">Quota Gateway</span>
-    <h1>仪表盘</h1>
-    <div class="dashboard-status-card__value">
-      <span class="status-pill" :class="`status-pill--${statusTone}`">{{
-        statusLabel
-      }}</span>
-      <span class="dashboard-last-sync">{{ lastSyncLabel }}</span>
-    </div>
-    <article class="dashboard-status-card">
-      <span class="dashboard-label">倒计时采集</span>
-      <div class="dashboard-status-card__meta">
-        <strong>{{ pollCountdownLabel }}</strong>
-        <span>{{ pollCountdownMeta }}</span>
+  <section class="dashboard-hero">
+    <div class="dashboard-hero__copy">
+      <span class="dashboard-kicker">Quota Gateway</span>
+      <h1>仪表盘</h1>
+      <div class="dashboard-status-card__value">
+        <span class="status-pill" :class="`status-pill--${statusTone}`">{{
+          statusLabel
+        }}</span>
+        <span class="dashboard-last-sync">{{ lastSyncLabel }}</span>
       </div>
-    </article>
-    <div class="button-group">
-      <button
-        type="button"
-        class="secondary-btn"
-        :disabled="refreshing || polling"
-        @click="emit('refresh')"
-      >
-        {{ refreshing ? "刷新中..." : "刷新面板" }}
-      </button>
-      <button
-        type="button"
-        class="primary-btn dashboard-primary-btn"
-        :disabled="refreshing || polling"
-        @click="emit('poll')"
-      >
-        {{ polling ? "采集中..." : "立即采集" }}
-      </button>
+      <p>{{ refreshFrequencyLabel }}</p>
+      <p>{{ refreshFrequencyMeta }}</p>
+    </div>
+
+    <div class="dashboard-hero__controls">
+      <article class="dashboard-status-card">
+        <span class="dashboard-label">倒计时采集</span>
+        <div class="dashboard-status-card__meta">
+          <strong>{{ pollCountdownLabel }}</strong>
+          <span>{{ pollCountdownMeta }}</span>
+        </div>
+      </article>
+
+      <div class="dashboard-toolbar">
+        <button
+          type="button"
+          class="secondary-btn"
+          :disabled="refreshing || polling"
+          @click="emit('refresh')"
+        >
+          {{ refreshing ? "刷新中..." : "刷新面板" }}
+        </button>
+        <button
+          type="button"
+          class="primary-btn dashboard-primary-btn"
+          :disabled="refreshing || polling"
+          @click="emit('poll')"
+        >
+          {{ polling ? "采集中..." : "立即采集" }}
+        </button>
+      </div>
     </div>
   </section>
 </template>
@@ -260,10 +268,6 @@ const emit = defineEmits<{
 .status-pill--critical {
   background: var(--critical-soft);
   color: var(--critical);
-}
-
-.button-group {
-  display: flex;
 }
 
 .status-pill--idle {

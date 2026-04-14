@@ -5,7 +5,7 @@ import AccountPoolTable from "../components/accounts/AccountPoolTable.vue";
 import { useAccountsStore } from "../stores/accounts.ts";
 
 const accountsStore = useAccountsStore();
-const { accounts, errorMessage } = storeToRefs(accountsStore);
+const { accounts, errorMessage, refreshing } = storeToRefs(accountsStore);
 
 const refreshAccounts = async () => {
   await accountsStore.refreshAccounts();
@@ -26,7 +26,11 @@ onUnmounted(() => {
       {{ errorMessage }}
     </div>
 
-    <AccountPoolTable :accounts="accounts" @created="refreshAccounts" />
+    <AccountPoolTable
+      :accounts="accounts"
+      :loading="refreshing"
+      @created="refreshAccounts"
+    />
   </div>
 </template>
 

@@ -5,6 +5,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   upstream_base_url TEXT NOT NULL,
   quota_path TEXT NOT NULL,
   proxy_path_prefix TEXT NOT NULL,
+  login_email TEXT,
+  login_password TEXT,
+  managed_by_gateway INTEGER NOT NULL DEFAULT 0,
+  provision_source TEXT NOT NULL DEFAULT 'manual',
+  provision_state TEXT NOT NULL DEFAULT 'idle',
+  last_provision_attempt_at TEXT,
+  last_provisioned_at TEXT,
+  last_provision_error TEXT,
   auth_json TEXT NOT NULL,
   workspace_kind TEXT NOT NULL DEFAULT 'unknown',
   workspace_id TEXT,
@@ -92,6 +100,13 @@ CREATE TABLE IF NOT EXISTS request_logs (
   duration_ms INTEGER,
   started_at TEXT NOT NULL,
   finished_at TEXT,
+  model TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  reasoning_tokens INTEGER,
+  cached_input_tokens INTEGER,
+  total_tokens INTEGER,
+  token_capture_source TEXT,
   FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 

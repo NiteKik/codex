@@ -1,18 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
-
-type RuntimeLog = {
-  id: number;
-  level: "info" | "warn" | "error";
-  scope: string;
-  event: string;
-  message: string;
-  account_id: string | null;
-  request_id: string | null;
-  session_id: string | null;
-  details_json: string | null;
-  created_at: string;
-};
+import { ref, watch } from "vue";
+import { fetchRuntimeLogs, type RuntimeLog } from "../../services/settings-page-api.ts";
+import { usePagePolling } from "../../composables/use-page-polling.ts";
+import { formatDateTime as formatDateTimeValue } from "../../utils/date-time.ts";
 
 const props = defineProps<{
   baseUrl: string;
@@ -23,43 +13,20 @@ const loading = ref(false);
 const queuedRefresh = ref(false);
 const errorMessage = ref("");
 const lastSync = ref<string | null>(null);
-let refreshTimerId: number | null = null;
 
-const formatDateTime = (value: string | null) => {
-  if (!value) {
-    return "尚未同步";
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return "时间未知";
-  }
-
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(parsed);
-};
-
-const requestBase = async <T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(`${baseUrl}${path}`, init);
-  const rawText = await response.text();
-  const payload = rawText ? (JSON.parse(rawText) as unknown) : null;
-
-  if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && "message" in payload
-        ? String((payload as { message: unknown }).message)
-        : `${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
-
-  return payload as T;
-};
+const formatDateTime = (value: string | null) =>
+  formatDateTimeValue(value, {
+    emptyText: "尚未同步",
+    invalidText: "时间未知",
+    format: {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    },
+  });
 
 const refreshLogs = async () => {
   if (loading.value) {
@@ -71,10 +38,11 @@ const refreshLogs = async () => {
   errorMessage.value = "";
 
   try {
-    const payload = await requestBase<{ runtime?: RuntimeLog[] }>(
-      props.baseUrl,
-      "/admin/logs?request_limit=1&decision_limit=1&runtime_limit=80",
-    );
+    const payload = await fetchRuntimeLogs(props.baseUrl, {
+      requestLimit: 1,
+      decisionLimit: 1,
+      runtimeLimit: 80,
+    });
     logs.value = Array.isArray(payload.runtime) ? payload.runtime : [];
     lastSync.value = new Date().toISOString();
   } catch (error) {
@@ -97,18 +65,17 @@ watch(
   { immediate: true },
 );
 
-onMounted(() => {
-  refreshTimerId = window.setInterval(() => {
+usePagePolling(
+  () => {
     void refreshLogs();
-  }, 30_000);
-});
-
-onUnmounted(() => {
-  if (refreshTimerId !== null) {
-    window.clearInterval(refreshTimerId);
-    refreshTimerId = null;
-  }
-});
+  },
+  30_000,
+  {
+    runOnMounted: false,
+    pauseWhenHidden: true,
+    refreshOnVisible: true,
+  },
+);
 </script>
 
 <template>

@@ -80,6 +80,8 @@ const reasonLabelMap: Record<string, string> = {
   "best-score": "最高得分",
   "best-score-preemptive": "最高得分（保留提前量）",
   "best-score-reserve-relaxed": "最高得分（提前量放宽）",
+  "free-priority-preemptive": "免费优先（保留提前量）",
+  "free-priority-reserve-relaxed": "免费优先（提前量放宽）",
   "reset-priority-preemptive": "重置优先（周→5小时，保留提前量）",
   "reset-priority-reserve-relaxed": "重置优先（周→5小时，提前量放宽）",
 };

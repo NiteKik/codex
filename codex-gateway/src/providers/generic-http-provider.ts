@@ -473,7 +473,12 @@ const toIsoTimestamp = (value: unknown) => {
   return toIsoFromEpochSeconds(value);
 };
 
-const parseWhamWindow = (value: unknown) => {
+const parseWhamWindow = (
+  value: unknown,
+  options?: {
+    avoidHardExhausted?: boolean;
+  },
+) => {
   if (!isRecord(value)) {
     return null;
   }
@@ -488,7 +493,12 @@ const parseWhamWindow = (value: unknown) => {
 
   const normalizedUsedPercent =
     usedPercent >= 0 && usedPercent <= 1 ? usedPercent * 100 : usedPercent;
-  const clampedUsedPercent = Math.min(100, Math.max(0, normalizedUsedPercent));
+  let clampedUsedPercent = Math.min(100, Math.max(0, normalizedUsedPercent));
+  if (options?.avoidHardExhausted && clampedUsedPercent >= 100) {
+    // Upstream may transiently return 100 while still reporting allowed=true.
+    // Keep a tiny headroom to avoid marking account exhausted prematurely.
+    clampedUsedPercent = 99;
+  }
   const resetAtIso = toIsoTimestamp(value.reset_at) ?? nowIso();
 
   // wham usage does not expose absolute quota units; keep normalized 0..100 scale.
@@ -511,8 +521,15 @@ const parseWhamUsagePayload = (payload: unknown) => {
     return null;
   }
 
-  const primaryWindow = parseWhamWindow(rateLimit.primary_window);
-  const secondaryWindow = parseWhamWindow(rateLimit.secondary_window);
+  const allowed = toBoolean(rateLimit.allowed);
+  const limitReached = toBoolean(rateLimit.limit_reached);
+  const avoidHardExhausted = allowed === true && limitReached !== true;
+  const primaryWindow = parseWhamWindow(rateLimit.primary_window, {
+    avoidHardExhausted,
+  });
+  const secondaryWindow = parseWhamWindow(rateLimit.secondary_window, {
+    avoidHardExhausted,
+  });
   const weeklyWindow = secondaryWindow ?? primaryWindow;
   const window5hWindow = primaryWindow ?? secondaryWindow;
 

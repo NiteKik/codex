@@ -2,6 +2,7 @@ import { AccountManager } from "../accounts/account-manager.js";
 import { schedulerWeights } from "../config.js";
 import { GatewayDatabase } from "../db/database.js";
 import { QuotaVirtualizer } from "../quota/quota-virtualizer.js";
+import { getAccountAutomationSettings } from "../runtime-settings.js";
 import { SessionManager } from "../session/session-manager.js";
 import type {
   QuotaState,
@@ -25,6 +26,11 @@ type SelectionResult = {
   stickyBinding: SessionBinding | null;
   candidateCount: number;
 };
+
+const normalizePlanType = (value: string | null | undefined) =>
+  value?.trim().toLowerCase() ?? "";
+
+const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
 
 export class Scheduler {
   constructor(
@@ -108,13 +114,19 @@ export class Scheduler {
     const binding = this.sessionManager.getBinding(input.sessionId);
     const stickyBinding =
       binding && new Date(binding.stickyUntil).getTime() > Date.now() ? binding : null;
+    const { enableFreeAccountScheduling } = getAccountAutomationSettings(this.db);
     const availableAccounts = this.accountManager
       .listAccounts()
       .filter((account) => !excluded.has(account.id));
     const statusEligibleAccounts = availableAccounts.filter(
       (account) => account.status !== "invalid" && account.status !== "cooling",
     );
-    const candidateStates = statusEligibleAccounts
+    const freeSchedulingFilteredAccounts = enableFreeAccountScheduling
+      ? statusEligibleAccounts
+      : statusEligibleAccounts.filter(
+          (account) => !isFreePlanType(account.subscription.planType),
+        );
+    const candidateStates = freeSchedulingFilteredAccounts
       .map((account) => ({
         account,
         quotaState: this.quotaVirtualizer.getAccountQuotaState(account.id),
@@ -133,9 +145,16 @@ export class Scheduler {
       const missingSnapshotCount = statusEligibleAccounts.filter(
         (account) => this.quotaVirtualizer.getAccountQuotaState(account.id).sampleTime === null,
       ).length;
+      const filteredFreeCount = statusEligibleAccounts.length - freeSchedulingFilteredAccounts.length;
+
+      if (!enableFreeAccountScheduling && filteredFreeCount > 0 && freeSchedulingFilteredAccounts.length === 0) {
+        throw new Error(
+          `No schedulable account is available. Free account scheduling is disabled and no paid account is currently routable. filtered_free=${filteredFreeCount}, estimated_units=${input.estimatedUnits}.`,
+        );
+      }
 
       throw new Error(
-        `No schedulable account is available. eligible=${statusEligibleAccounts.length}, missing_snapshot=${missingSnapshotCount}, estimated_units=${input.estimatedUnits}.`,
+        `No schedulable account is available. eligible=${statusEligibleAccounts.length}, missing_snapshot=${missingSnapshotCount}, filtered_free=${filteredFreeCount}, estimated_units=${input.estimatedUnits}.`,
       );
     }
 
@@ -148,10 +167,10 @@ export class Scheduler {
       ),
     );
     const scoreByAccountId = new Map(scores.map((score) => [score.accountId, score]));
-    const preferredCandidates = candidateStates.filter(({ quotaState }) =>
-      this.hasPreemptiveHeadroom(quotaState, input.estimatedUnits),
+    const { rankingCandidates, reason } = this.pickRankingCandidates(
+      candidateStates,
+      input.estimatedUnits,
     );
-    const rankingCandidates = preferredCandidates.length > 0 ? preferredCandidates : candidateStates;
 
     const stickyCandidate = stickyBinding
       ? rankingCandidates.find(({ account, quotaState }) => {
@@ -169,19 +188,57 @@ export class Scheduler {
         this.compareByResetPriority(left, right, scoreByAccountId),
       )[0];
 
-    const reason =
-      stickyCandidate && stickyBinding?.accountId === stickyCandidate.account.id
-        ? "sticky-session"
-        : preferredCandidates.length > 0
-          ? "reset-priority-preemptive"
-          : "reset-priority-reserve-relaxed";
-
     return {
       selected,
       scores,
-      reason,
+      reason:
+        stickyCandidate && stickyBinding?.accountId === stickyCandidate.account.id
+          ? "sticky-session"
+          : reason,
       stickyBinding,
       candidateCount: candidateStates.length,
+    };
+  }
+
+  private pickRankingCandidates(candidateStates: CandidateState[], estimatedUnits: number) {
+    const freeCandidates = candidateStates.filter(({ account }) =>
+      isFreePlanType(account.subscription.planType),
+    );
+    const paidCandidates =
+      freeCandidates.length === candidateStates.length
+        ? []
+        : candidateStates.filter(({ account }) => !isFreePlanType(account.subscription.planType));
+    const preferredFreeCandidates = freeCandidates.filter(({ quotaState }) =>
+      this.hasPreemptiveHeadroom(quotaState, estimatedUnits),
+    );
+    const preferredPaidCandidates = paidCandidates.filter(({ quotaState }) =>
+      this.hasPreemptiveHeadroom(quotaState, estimatedUnits),
+    );
+
+    if (preferredFreeCandidates.length > 0) {
+      return {
+        rankingCandidates: preferredFreeCandidates,
+        reason: "free-priority-preemptive",
+      };
+    }
+
+    if (freeCandidates.length > 0) {
+      return {
+        rankingCandidates: freeCandidates,
+        reason: "free-priority-reserve-relaxed",
+      };
+    }
+
+    if (preferredPaidCandidates.length > 0) {
+      return {
+        rankingCandidates: preferredPaidCandidates,
+        reason: "reset-priority-preemptive",
+      };
+    }
+
+    return {
+      rankingCandidates: candidateStates,
+      reason: "reset-priority-reserve-relaxed",
     };
   }
 

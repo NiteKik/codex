@@ -210,6 +210,18 @@ export const renderPlusPage = (container: HTMLElement) => {
   }
 
   let toastTimer: number | undefined;
+  const cleanupTasks: Array<() => void> = [];
+
+  const addDomEventListener = (
+    target: EventTarget,
+    type: string,
+    listener: EventListener,
+  ) => {
+    target.addEventListener(type, listener);
+    cleanupTasks.push(() => {
+      target.removeEventListener(type, listener);
+    });
+  };
 
   const showToast = (message: string, tone: "error" | "success" = "error") => {
     plusHeroToast.textContent = message;
@@ -247,9 +259,12 @@ export const renderPlusPage = (container: HTMLElement) => {
     plusSessionHint.textContent = isBlank ? "" : result.message;
   };
 
-  plusSessionInput.addEventListener("input", syncSessionState);
+  const onSessionInput = () => {
+    syncSessionState();
+  };
+  addDomEventListener(plusSessionInput, "input", onSessionInput);
 
-  plusPreorderForm.addEventListener("submit", (event) => {
+  const onPreorderSubmit = (event: Event) => {
     event.preventDefault();
 
     const result = parseSessionPayload(plusSessionInput.value);
@@ -265,31 +280,40 @@ export const renderPlusPage = (container: HTMLElement) => {
       `已识别账号 ${result.email}，当前页面已完成前端展示，可继续接入支付流程。`,
       "success",
     );
-  });
+  };
+  addDomEventListener(plusPreorderForm, "submit", onPreorderSubmit);
 
   document.querySelectorAll<HTMLElement>("[data-dialog-target]").forEach((trigger) => {
-    trigger.addEventListener("click", () => {
+    const onTriggerClick = () => {
       const dialogId = trigger.dataset.dialogTarget;
       const dialog = dialogId ? document.getElementById(dialogId) : null;
 
       if (dialog instanceof HTMLDialogElement) {
         dialog.showModal();
       }
-    });
+    };
+
+    addDomEventListener(trigger, "click", onTriggerClick);
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-close-dialog]").forEach((button) => {
-    button.addEventListener("click", () => {
+    const onCloseDialog = () => {
       const dialog = button.closest("dialog");
 
       if (dialog instanceof HTMLDialogElement) {
         dialog.close();
       }
-    });
+    };
+
+    addDomEventListener(button, "click", onCloseDialog);
   });
 
   document.querySelectorAll<HTMLDialogElement>(".help-dialog").forEach((dialog) => {
-    dialog.addEventListener("click", (event) => {
+    const onDialogClick = (event: Event) => {
+      if (!(event instanceof MouseEvent)) {
+        return;
+      }
+
       const rect = dialog.getBoundingClientRect();
       const isInsideDialog =
         rect.top <= event.clientY &&
@@ -300,8 +324,23 @@ export const renderPlusPage = (container: HTMLElement) => {
       if (!isInsideDialog) {
         dialog.close();
       }
-    });
+    };
+
+    addDomEventListener(dialog, "click", onDialogClick);
   });
 
   syncSessionState();
+
+  return () => {
+    if (toastTimer) {
+      window.clearTimeout(toastTimer);
+      toastTimer = undefined;
+    }
+
+    for (const cleanup of cleanupTasks.reverse()) {
+      cleanup();
+    }
+
+    container.innerHTML = "";
+  };
 };

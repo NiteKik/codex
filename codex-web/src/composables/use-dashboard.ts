@@ -1,6 +1,12 @@
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { storeToRefs } from "pinia";
 import type { AccountRow } from "../services/gateway-api.ts";
-import { getStoredGatewayBaseUrl } from "../utils/gateway-base-url.ts";
+import { useAppConfigStore } from "../stores/app-config.ts";
+import {
+  fetchDashboardSnapshot,
+  triggerDashboardPoll,
+} from "../services/dashboard-page-api.ts";
+import { usePagePolling } from "./use-page-polling.ts";
 import {
   dashboardRefreshIntervalMs,
   defaultCollectIntervalMs,
@@ -12,28 +18,11 @@ import {
   getLatestDashboardSampleTime,
   parseDashboardScoreBreakdown,
   type DashboardDecisionLog,
-  type DashboardHealth,
   type DashboardLogsPayload,
   type DashboardMetricCard,
   type DashboardStatusTone,
   type DashboardVirtualQuotaPool,
 } from "../components/dashboard/dashboard-model.ts";
-
-const createDashboardRequest = async <T>(baseUrl: string, path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(`${baseUrl}${path}`, init);
-  const rawText = await response.text();
-  const payload = rawText ? (JSON.parse(rawText) as unknown) : null;
-
-  if (!response.ok) {
-    const message =
-      payload && typeof payload === "object" && "message" in payload
-        ? String((payload as { message: unknown }).message)
-        : `${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
-
-  return payload as T;
-};
 
 const emptyPool = (): DashboardVirtualQuotaPool => ({
   accountCount: 0,
@@ -46,7 +35,8 @@ const emptyPool = (): DashboardVirtualQuotaPool => ({
 });
 
 export const useDashboard = () => {
-  const gatewayBaseUrl = getStoredGatewayBaseUrl();
+  const appConfigStore = useAppConfigStore();
+  const { gatewayBaseUrl } = storeToRefs(appConfigStore);
   const accounts = ref<AccountRow[]>([]);
   const virtualPool = ref<DashboardVirtualQuotaPool>(emptyPool());
   const logs = ref<DashboardLogsPayload>({ requests: [], decisions: [] });
@@ -59,9 +49,7 @@ export const useDashboard = () => {
   const lastSyncAt = ref<string | null>(null);
   const collectIntervalMs = ref(defaultCollectIntervalMs);
   const nowMs = ref(Date.now());
-
-  let refreshTimerId: number | null = null;
-  let countdownTimerId: number | null = null;
+  let refreshTask: Promise<void> | null = null;
 
   const selectedDecision = computed<DashboardDecisionLog | null>(() => {
     if (logs.value.decisions.length === 0) {
@@ -164,40 +152,49 @@ export const useDashboard = () => {
     ];
   });
 
-  const refreshDashboard = async () => {
-    if (refreshing.value) {
-      return;
+  const refreshDashboard = (options?: { force?: boolean }): Promise<void> => {
+    const force = Boolean(options?.force);
+
+    if (refreshTask && !force) {
+      return refreshTask;
     }
 
-    refreshing.value = true;
-    errorMessage.value = "";
-
-    try {
-      const [health, nextAccounts, nextVirtualPool, nextLogs] = await Promise.all([
-        createDashboardRequest<DashboardHealth>(gatewayBaseUrl, "/healthz"),
-        createDashboardRequest<AccountRow[]>(gatewayBaseUrl, "/admin/accounts"),
-        createDashboardRequest<DashboardVirtualQuotaPool>(gatewayBaseUrl, "/admin/virtual-quota"),
-        createDashboardRequest<DashboardLogsPayload>(gatewayBaseUrl, "/admin/logs"),
-      ]);
-
-      collectIntervalMs.value =
-        typeof health.pollIntervalMs === "number" && health.pollIntervalMs > 0
-          ? health.pollIntervalMs
-          : collectIntervalMs.value;
-      accounts.value = nextAccounts;
-      virtualPool.value = nextVirtualPool;
-      logs.value = nextLogs;
-      statusTone.value = health.ok ? "healthy" : "warning";
-      statusLabel.value = health.ok ? "已连接" : "异常";
-      lastSyncAt.value = new Date().toISOString();
-      nowMs.value = Date.now();
-    } catch (error) {
-      statusTone.value = "critical";
-      statusLabel.value = "连接失败";
-      errorMessage.value = error instanceof Error ? error.message : "面板加载失败。";
-    } finally {
-      refreshing.value = false;
+    if (refreshTask && force) {
+      return refreshTask.then(() => refreshDashboard({ force: true }));
     }
+
+    refreshTask = (async () => {
+      refreshing.value = true;
+      errorMessage.value = "";
+
+      try {
+        const baseUrl = gatewayBaseUrl.value;
+        const { health, accounts: nextAccounts, virtualPool: nextVirtualPool, logs: nextLogs } =
+          await fetchDashboardSnapshot(baseUrl);
+
+        collectIntervalMs.value =
+          typeof health.pollIntervalMs === "number" && health.pollIntervalMs > 0
+            ? health.pollIntervalMs
+            : collectIntervalMs.value;
+        accounts.value = nextAccounts;
+        virtualPool.value = nextVirtualPool;
+        logs.value = nextLogs;
+        statusTone.value = health.ok ? "healthy" : "warning";
+        statusLabel.value = health.ok ? "已连接" : "异常";
+        lastSyncAt.value = new Date().toISOString();
+        nowMs.value = Date.now();
+      } catch (error) {
+        statusTone.value = "critical";
+        statusLabel.value = "连接失败";
+        errorMessage.value = error instanceof Error ? error.message : "面板加载失败。";
+      } finally {
+        refreshing.value = false;
+      }
+    })().finally(() => {
+      refreshTask = null;
+    });
+
+    return refreshTask;
   };
 
   const pollNow = async () => {
@@ -209,10 +206,8 @@ export const useDashboard = () => {
     errorMessage.value = "";
 
     try {
-      await createDashboardRequest<{ ok: boolean }>(gatewayBaseUrl, "/admin/poll", {
-        method: "POST",
-      });
-      await refreshDashboard();
+      await triggerDashboardPoll(gatewayBaseUrl.value);
+      await refreshDashboard({ force: true });
     } catch (error) {
       statusTone.value = "critical";
       statusLabel.value = "采集失败";
@@ -227,29 +222,33 @@ export const useDashboard = () => {
     selectedDecisionId.value = decisionId;
   };
 
-  onMounted(() => {
+  watch(gatewayBaseUrl, () => {
     void refreshDashboard();
+  });
 
-    refreshTimerId = window.setInterval(() => {
+  usePagePolling(
+    () => {
       void refreshDashboard();
-    }, dashboardRefreshIntervalMs);
+    },
+    dashboardRefreshIntervalMs,
+    {
+      runOnMounted: true,
+      pauseWhenHidden: true,
+      refreshOnVisible: true,
+    },
+  );
 
-    countdownTimerId = window.setInterval(() => {
+  usePagePolling(
+    () => {
       nowMs.value = Date.now();
-    }, 1_000);
-  });
-
-  onUnmounted(() => {
-    if (refreshTimerId !== null) {
-      window.clearInterval(refreshTimerId);
-      refreshTimerId = null;
-    }
-
-    if (countdownTimerId !== null) {
-      window.clearInterval(countdownTimerId);
-      countdownTimerId = null;
-    }
-  });
+    },
+    1_000,
+    {
+      runOnMounted: false,
+      pauseWhenHidden: true,
+      refreshOnVisible: false,
+    },
+  );
 
   return {
     accounts,

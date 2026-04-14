@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { AccountManager } from "../accounts/account-manager.js";
 import { GatewayDatabase } from "../db/database.js";
+import { ChatgptSessionRefreshManager } from "../integrations/chatgpt-session-refresh-manager.js";
 import type { Account } from "../types.js";
 import { ProviderHttpError, type ProviderClient } from "../providers/provider-client.js";
 import { nowIso } from "../utils/time.js";
@@ -14,6 +15,7 @@ export class QuotaPoller extends EventEmitter {
     private readonly accountManager: AccountManager,
     private readonly provider: ProviderClient,
     intervalMs: number,
+    private readonly sessionRefreshManager?: ChatgptSessionRefreshManager,
   ) {
     super();
     this.intervalMs = this.normalizeIntervalMs(intervalMs);
@@ -109,7 +111,7 @@ export class QuotaPoller extends EventEmitter {
 
   private async pollAccount(account: Account, source: "poller" | "manual") {
     try {
-      const snapshot = await this.provider.fetchQuota(account);
+      const snapshot = await this.fetchQuotaWithRecovery(account, source);
       const workspaceUpdated = this.accountManager.mergeWorkspaceHint(
         account.id,
         snapshot.workspaceHint,
@@ -181,6 +183,43 @@ export class QuotaPoller extends EventEmitter {
       });
       this.emit("account_polled", { accountId: account.id, ok: false, error: message });
       throw error;
+    }
+  }
+
+  private async fetchQuotaWithRecovery(account: Account, source: "poller" | "manual") {
+    try {
+      return await this.provider.fetchQuota(account);
+    } catch (error) {
+      const httpStatus = error instanceof ProviderHttpError ? error.httpStatus : null;
+      const canRecover =
+        (httpStatus === 401 || httpStatus === 403) &&
+        this.sessionRefreshManager?.canRefreshAccount(account);
+      if (!canRecover || !this.sessionRefreshManager) {
+        throw error;
+      }
+
+      this.db.logRuntime({
+        level: "warn",
+        scope: "quota-poller",
+        event: "poll.account_refreshing_session",
+        message: "额度采集命中鉴权错误，尝试自动刷新 session",
+        accountId: account.id,
+        detailsJson: JSON.stringify({
+          source,
+          httpStatus,
+        }),
+        createdAt: nowIso(),
+      });
+
+      await this.sessionRefreshManager.refreshAccountSession(account.id, {
+        reason: `quota-poll:${source}:${httpStatus}`,
+      });
+      const refreshed = this.accountManager.getAccount(account.id);
+      if (!refreshed) {
+        throw error;
+      }
+
+      return this.provider.fetchQuota(refreshed);
     }
   }
 

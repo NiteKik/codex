@@ -117,9 +117,28 @@ export const config = {
   browserProfileDir:
     process.env.BROWSER_PROFILE_DIR ?? resolve(dataDir, "browser-profiles"),
   browserExecutablePath: process.env.BROWSER_EXECUTABLE_PATH ?? "",
+  managedBrowserExecutablePath:
+    process.env.MANAGED_BROWSER_EXECUTABLE_PATH ?? process.env.BROWSER_EXECUTABLE_PATH ?? "",
   pollIntervalMs: toNumber(process.env.POLL_INTERVAL_MS, 30_000),
   chatgptCaptureTimeoutMs: toNumber(process.env.CHATGPT_CAPTURE_TIMEOUT_MS, 10 * 60_000),
   chatgptCapturePollIntervalMs: toNumber(process.env.CHATGPT_CAPTURE_POLL_INTERVAL_MS, 3_000),
+  autoRegisterEnabled: toBoolean(process.env.AUTO_REGISTER_ENABLED, false),
+  autoRegisterThreshold: Math.max(1, toNumber(process.env.AUTO_REGISTER_THRESHOLD, 15)),
+  autoRegisterBatchSize: Math.max(1, toNumber(process.env.AUTO_REGISTER_BATCH_SIZE, 1)),
+  autoRegisterCheckIntervalMs: Math.max(
+    10_000,
+    toNumber(process.env.AUTO_REGISTER_CHECK_INTERVAL_MS, 60_000),
+  ),
+  autoRegisterTimeoutMs: Math.max(
+    60_000,
+    toNumber(process.env.AUTO_REGISTER_TIMEOUT_MS, 8 * 60_000),
+  ),
+  autoRegisterHeadless: toBoolean(process.env.AUTO_REGISTER_HEADLESS, false),
+  enableFreeAccountScheduling: toBoolean(process.env.ENABLE_FREE_ACCOUNT_SCHEDULING, true),
+  tempMailBaseUrl: process.env.TEMP_MAIL_BASE_URL?.trim() ?? "",
+  tempMailAdminPassword: process.env.TEMP_MAIL_ADMIN_PASSWORD?.trim() ?? "",
+  tempMailSitePassword: process.env.TEMP_MAIL_SITE_PASSWORD?.trim() ?? "",
+  tempMailDefaultDomain: process.env.TEMP_MAIL_DEFAULT_DOMAIN?.trim() ?? "",
   cooldownMs: toNumber(process.env.COOLDOWN_MS, 15 * 60_000),
   stickyTtlMs: toNumber(process.env.SESSION_STICKY_TTL_MS, 20 * 60_000),
   maxProxyAttempts: toNumber(process.env.MAX_PROXY_ATTEMPTS, 2),

@@ -1,30 +1,11 @@
 <script setup lang="ts">
-import AccountsPage from "./pages/accounts-page.vue";
-import DashboardPage from "./pages/dashboard-page.vue";
-import PlusPage from "./pages/plus-page.vue";
-import SettingsPage from "./pages/settings-page.vue";
-import TokensPage from "./pages/tokens-page.vue";
+import { computed } from "vue";
+import { RouterLink, RouterView, useRoute } from "vue-router";
+import { navigationItems } from "./router/routes.ts";
 
-const currentPath = window.location.pathname;
+const route = useRoute();
 
-const pageTitleMap: Record<string, string> = {
-  "/": "Plus 自助页",
-  "/accounts": "账号管理",
-  "/dashboard": "仪表盘",
-  "/tokens": "Token 管理",
-  "/settings": "设置",
-};
-
-const currentPageMap = {
-  "/": PlusPage,
-  "/accounts": AccountsPage,
-  "/dashboard": DashboardPage,
-  "/tokens": TokensPage,
-  "/settings": SettingsPage,
-};
-
-const pageTitle = pageTitleMap[currentPath] ?? "Plus 自助页";
-const CurrentPage = currentPageMap[currentPath as keyof typeof currentPageMap] ?? PlusPage;
+const pageTitle = computed(() => route.meta.title ?? "Plus 自助页");
 </script>
 
 <template>
@@ -35,24 +16,21 @@ const CurrentPage = currentPageMap[currentPath as keyof typeof currentPageMap] ?
         <strong>{{ pageTitle }}</strong>
       </div>
       <nav class="topbar__nav" aria-label="页面导航">
-        <a href="/" class="topbar__link" :class="{ 'is-active': currentPath === '/' }">现有页面</a>
-        <a href="/accounts" class="topbar__link" :class="{ 'is-active': currentPath === '/accounts' }">
-          账号管理
-        </a>
-        <a href="/dashboard" class="topbar__link" :class="{ 'is-active': currentPath === '/dashboard' }">
-          仪表盘
-        </a>
-        <a href="/tokens" class="topbar__link" :class="{ 'is-active': currentPath === '/tokens' }">
-          Token 管理
-        </a>
-        <a href="/settings" class="topbar__link" :class="{ 'is-active': currentPath === '/settings' }">
-          设置
-        </a>
+        <RouterLink
+          v-for="item in navigationItems"
+          :key="item.to"
+          :to="item.to"
+          class="topbar__link"
+          active-class="is-active"
+          exact-active-class="is-active"
+        >
+          {{ item.label }}
+        </RouterLink>
       </nav>
     </header>
 
     <main class="route-root">
-      <component :is="CurrentPage" />
+      <RouterView />
     </main>
   </div>
 </template>
