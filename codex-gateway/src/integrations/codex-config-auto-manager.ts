@@ -13,21 +13,17 @@ import { fileURLToPath } from "node:url";
 import type { GatewayDatabase } from "../db/database.js";
 import { nowIso } from "../utils/time.js";
 
-const managedProviderKey = "quota_gateway_auto_switch_managed";
 const managedBlockStart = "# >>> quota-gateway auto-config (managed by codex-gateway) >>>";
 const managedBlockEnd = "# <<< quota-gateway auto-config (managed by codex-gateway) <<<";
+const managedProviderId = "quota_gateway_auto_switch_managed";
 
 type CodexAutoConfigMode =
   | "provider_auth"
-  | "provider_env"
-  | "openai_base_url"
-  | "openai_base_url_no_forced";
+  | "provider_env";
 
 const autoConfigModes = new Set<CodexAutoConfigMode>([
   "provider_auth",
   "provider_env",
-  "openai_base_url",
-  "openai_base_url_no_forced",
 ]);
 
 const runtimeSettingKeys = {
@@ -77,8 +73,6 @@ const parsePid = (value: string | null) => {
 
 const toTomlString = (value: string) => JSON.stringify(value);
 
-const toTomlPath = (value: string) => value.replaceAll("\\", "/");
-
 const readTextFile = (filePath: string) =>
   existsSync(filePath) ? normalizeNewlines(readFileSync(filePath, "utf8")) : "";
 
@@ -96,23 +90,6 @@ const stripConfigKeys = (content: string, keys: string[]) => {
   }
   const pattern = new RegExp(`^(\\s*)(?:${keys.map(escapeRegExp).join("|")})\\s*=.*$`, "gm");
   return content.replace(pattern, "").trimEnd();
-};
-
-const replaceModelProvider = (content: string) => {
-  const modelProviderPattern = /^(\s*)model_provider\s*=\s*".*?"\s*(?:#.*)?$/m;
-  if (modelProviderPattern.test(content)) {
-    return content.replace(
-      modelProviderPattern,
-      `model_provider = "${managedProviderKey}"`,
-    );
-  }
-
-  const trimmedStart = content.trimStart();
-  if (!trimmedStart) {
-    return `model_provider = "${managedProviderKey}"`;
-  }
-
-  return `model_provider = "${managedProviderKey}"\n\n${trimmedStart}`;
 };
 
 const isProcessAlive = (pid: number) => {
@@ -150,7 +127,6 @@ export type CodexAutoConfigStatus = {
 export class CodexConfigAutoManager {
   private readonly configPath: string;
   private readonly backupPath: string;
-  private readonly gatewayWorkingDir: string;
   private readonly guardianScriptPath: string;
   private bunAvailableCache: boolean | null = null;
 
@@ -158,12 +134,10 @@ export class CodexConfigAutoManager {
     private readonly db: GatewayDatabase,
     private readonly options: {
       gatewayPort: number;
-      gatewayWorkingDir: string;
     },
   ) {
     this.configPath = join(homedir(), ".codex", "config.toml");
     this.backupPath = `${this.configPath}.back`;
-    this.gatewayWorkingDir = options.gatewayWorkingDir;
 
     const currentFilePath = fileURLToPath(import.meta.url);
     const currentExt = extname(currentFilePath);
@@ -175,9 +149,9 @@ export class CodexConfigAutoManager {
   }
 
   initialize() {
+    // Silent startup: always bootstrap auto-config on gateway boot.
     if (!this.isEnabled()) {
-      this.stopGuardian();
-      return this.getStatus();
+      this.setEnabledSetting(true);
     }
 
     try {
@@ -258,11 +232,11 @@ export class CodexConfigAutoManager {
     if (stored && autoConfigModes.has(stored as CodexAutoConfigMode)) {
       return stored as CodexAutoConfigMode;
     }
-    return "openai_base_url";
+    return "provider_env";
   }
 
   setMode(mode: CodexAutoConfigMode) {
-    const normalized = autoConfigModes.has(mode) ? mode : "openai_base_url";
+    const normalized = autoConfigModes.has(mode) ? mode : "provider_env";
     this.db.setRuntimeSetting(runtimeSettingKeys.mode, normalized);
   }
 
@@ -319,51 +293,37 @@ export class CodexConfigAutoManager {
 
   private buildManagedContent(baseContent: string) {
     const contentWithoutManagedBlock = stripManagedBlock(baseContent);
-    const mode = this.resolveMode(this.getMode());
-    const normalizedGatewayWorkingDir = toTomlPath(this.gatewayWorkingDir);
+    const contentWithoutLegacyOpenaiKeys = stripConfigKeys(contentWithoutManagedBlock, [
+      "openai_base_url",
+      "forced_login_method",
+    ]);
+    const contentWithoutModelProvider = stripConfigKeys(contentWithoutLegacyOpenaiKeys, [
+      "model_provider",
+    ]);
     const gatewayBaseUrl = `http://127.0.0.1:${this.options.gatewayPort}`;
-
-    if (mode === "openai_base_url" || mode === "openai_base_url_no_forced") {
-      const sanitized = stripConfigKeys(contentWithoutManagedBlock, [
-        "openai_base_url",
-        "forced_login_method",
-      ]);
-      const managedBlock = [
-        managedBlockStart,
-        `openai_base_url = ${toTomlString(gatewayBaseUrl)}`,
-        ...(mode === "openai_base_url" ? ['forced_login_method = "chatgpt"'] : []),
-        managedBlockEnd,
-      ].join("\n");
-
-      if (!sanitized.trim()) {
-        return ensureTrailingNewline(managedBlock);
-      }
-
-      return ensureTrailingNewline(`${sanitized.trimEnd()}\n\n${managedBlock}`);
-    }
-
-    const contentWithManagedProvider = replaceModelProvider(contentWithoutManagedBlock);
+    const cleanedContent = contentWithoutModelProvider
+      .replace(
+        new RegExp(`^(\\s*)model_provider\\s*=\\s*"${escapeRegExp(managedProviderId)}"\\s*(?:#.*)?$`, "m"),
+        "",
+      )
+      .trimEnd();
     const managedBlock = [
       managedBlockStart,
-      `[model_providers.${managedProviderKey}]`,
+      `[model_providers.${managedProviderId}]`,
       'name = "Local Quota Gateway"',
       `base_url = ${toTomlString(gatewayBaseUrl)}`,
-      "",
-      ...(mode === "provider_env"
-        ? ['env_key = "QUOTA_GATEWAY_TOKEN"']
-        : [
-            `[model_providers.${managedProviderKey}.auth]`,
-            'command = "bun"',
-            `args = ["run", "--cwd", ${toTomlString(normalizedGatewayWorkingDir)}, "print-token"]`,
-          ]),
+      'env_key = "QUOTA_GATEWAY_TOKEN"',
       managedBlockEnd,
     ].join("\n");
+    const forcedModelProviderLine = `model_provider = "${managedProviderId}"`;
 
-    if (!contentWithManagedProvider.trim()) {
-      return ensureTrailingNewline(managedBlock);
+    if (!cleanedContent.trim()) {
+      return ensureTrailingNewline(`${forcedModelProviderLine}\n\n${managedBlock}`);
     }
 
-    return ensureTrailingNewline(`${contentWithManagedProvider.trimEnd()}\n\n${managedBlock}`);
+    return ensureTrailingNewline(
+      `${forcedModelProviderLine}\n\n${cleanedContent.trimEnd()}\n\n${managedBlock}`,
+    );
   }
 
   private applyManagedConfig() {
@@ -383,10 +343,7 @@ export class CodexConfigAutoManager {
     if (!existsSync(this.backupPath)) {
       const current = readTextFile(this.configPath);
       const stripped = stripManagedBlock(current).replace(
-        new RegExp(
-          `^(\\s*)model_provider\\s*=\\s*"${escapeRegExp(managedProviderKey)}"\\s*(?:#.*)?$`,
-          "m",
-        ),
+        new RegExp(`^(\\s*)model_provider\\s*=\\s*"${escapeRegExp(managedProviderId)}"\\s*(?:#.*)?$`, "m"),
         "",
       );
       writeFileSync(this.configPath, ensureTrailingNewline(stripped.trimEnd()), "utf8");

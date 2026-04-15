@@ -121,6 +121,11 @@ const serializeBody = (body: unknown) => {
 const isNoSchedulableError = (error: unknown) =>
   error instanceof Error && error.message.includes("No schedulable account is available.");
 
+const normalizePlanType = (value: string | null | undefined) =>
+  value?.trim().toLowerCase() ?? "";
+
+const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
+
 const isResponsesPath = (path: string) =>
   path === "/responses" ||
   path.startsWith("/responses/") ||
@@ -236,10 +241,34 @@ export class ProxyService {
           );
         }
 
+        const shouldSkipAuthRefreshForFreeUnauthorizedResponses =
+          upstream.upstreamStatus === 401 &&
+          isResponsesPath(proxyPath) &&
+          isFreePlanType(decision.account.subscription.planType);
+
+        if (shouldSkipAuthRefreshForFreeUnauthorizedResponses) {
+          this.db.logRuntime({
+            level: "warn",
+            scope: "proxy",
+            event: "proxy.auth_refresh_skipped_free_401",
+            message: "免费账号 /responses 返回 401，跳过自动刷新并转入冻结冷却",
+            accountId: decision.account.id,
+            requestId,
+            sessionId,
+            detailsJson: JSON.stringify({
+              proxyPath,
+              upstreamStatus: upstream.upstreamStatus,
+              planType: decision.account.subscription.planType,
+            }),
+            createdAt: nowIso(),
+          });
+        }
+
         if (
           (upstream.upstreamStatus === 401 || upstream.upstreamStatus === 403) &&
           this.sessionRefreshManager?.canRefreshAccount(decision.account) &&
-          !refreshedAccountIds.has(decision.account.id)
+          !refreshedAccountIds.has(decision.account.id) &&
+          !shouldSkipAuthRefreshForFreeUnauthorizedResponses
         ) {
           refreshedAccountIds.add(decision.account.id);
           try {

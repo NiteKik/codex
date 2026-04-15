@@ -21,86 +21,32 @@ const emit = defineEmits<{
 
 <template>
   <section class="dashboard-hero">
-    <div class="dashboard-hero__copy">
+    <div>
       <span class="dashboard-kicker">Quota Gateway</span>
-      <h1>仪表盘</h1>
-      <div class="dashboard-status-card__value">
-        <span class="status-pill" :class="`status-pill--${statusTone}`">{{
-          statusLabel
-        }}</span>
-        <span class="dashboard-last-sync">{{ lastSyncLabel }}</span>
-      </div>
-      <p>{{ refreshFrequencyLabel }}</p>
-      <p>{{ refreshFrequencyMeta }}</p>
+      <h2>仪表盘</h2>
     </div>
 
-    <div class="dashboard-hero__controls">
-      <article class="dashboard-status-card">
-        <span class="dashboard-label">倒计时采集</span>
-        <div class="dashboard-status-card__meta">
-          <strong>{{ pollCountdownLabel }}</strong>
-          <span>{{ pollCountdownMeta }}</span>
-        </div>
-      </article>
-
-      <div class="dashboard-toolbar">
-        <button
-          type="button"
-          class="secondary-btn"
-          :disabled="refreshing || polling"
-          @click="emit('refresh')"
-        >
-          {{ refreshing ? "刷新中..." : "刷新面板" }}
-        </button>
-        <button
-          type="button"
-          class="primary-btn dashboard-primary-btn"
-          :disabled="refreshing || polling"
-          @click="emit('poll')"
-        >
-          {{ polling ? "采集中..." : "立即采集" }}
-        </button>
-      </div>
+    <div class="dashboard-status-card__value">
+      <span class="status-pill" :class="`status-pill--${statusTone}`">{{
+        statusLabel
+      }}</span>
+      <span class="dashboard-last-sync">{{ lastSyncLabel }}</span>
     </div>
   </section>
 </template>
 
 <style scoped>
 .dashboard-hero {
-  position: relative;
-  overflow: hidden;
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
   gap: 24px;
-  padding: 28px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 30px;
   background: rgba(255, 253, 248, 0.82);
   box-shadow: var(--shadow);
   backdrop-filter: blur(16px);
-}
-
-.dashboard-hero::before {
-  content: "";
-  position: absolute;
-  inset: auto auto -72px -48px;
-  width: 180px;
-  height: 180px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    rgba(216, 109, 57, 0.12),
-    transparent 70%
-  );
-  pointer-events: none;
-}
-
-.dashboard-hero__copy,
-.dashboard-hero__controls {
-  display: flex;
-  justify-content: space-between;
-  position: relative;
-  z-index: 1;
 }
 
 .dashboard-kicker {

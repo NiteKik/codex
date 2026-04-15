@@ -2,13 +2,16 @@ import { EventEmitter } from "node:events";
 import { AccountManager } from "../accounts/account-manager.js";
 import { GatewayDatabase } from "../db/database.js";
 import { ChatgptSessionRefreshManager } from "../integrations/chatgpt-session-refresh-manager.js";
-import type { Account } from "../types.js";
+import type { Account, QuotaSnapshot } from "../types.js";
 import { ProviderHttpError, type ProviderClient } from "../providers/provider-client.js";
 import { nowIso } from "../utils/time.js";
 
 export class QuotaPoller extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
+  private nextAccountIndex = 0;
+  private runningTask: Promise<PromiseSettledResult<QuotaSnapshot>[]> | null = null;
+  private queuedSource: "poller" | "manual" | null = null;
 
   constructor(
     private readonly db: GatewayDatabase,
@@ -72,9 +75,77 @@ export class QuotaPoller extends EventEmitter {
   }
 
   async runOnce(source: "poller" | "manual") {
+    if (this.runningTask) {
+      this.queuedSource = source === "manual" ? "manual" : this.queuedSource ?? "poller";
+      this.db.logRuntime({
+        level: "info",
+        scope: "quota-poller",
+        event: "poll.queued",
+        message: "Quota polling is busy, queued next round",
+        detailsJson: JSON.stringify({
+          source,
+          queuedSource: this.queuedSource,
+        }),
+        createdAt: nowIso(),
+      });
+      return this.runningTask;
+    }
+
+    const execution = this.runQueuedOnce(source).finally(() => {
+      this.runningTask = null;
+      const queued = this.queuedSource;
+      this.queuedSource = null;
+      if (queued) {
+        void this.runOnce(queued);
+      }
+    });
+    this.runningTask = execution;
+    return execution;
+  }
+
+  private async runQueuedOnce(source: "poller" | "manual") {
     const allAccounts = this.accountManager.listAccounts();
-    const accounts = allAccounts;
-    const skippedInvalidCount = 0;
+    if (allAccounts.length === 0) {
+      this.db.logRuntime({
+        level: "info",
+        scope: "quota-poller",
+        event: "poll.start",
+        message: `Quota polling started (${source})`,
+        detailsJson: JSON.stringify({
+          source,
+          accountCount: 0,
+          skippedInvalidCount: 0,
+          mode: "queue-single-account",
+        }),
+        createdAt: nowIso(),
+      });
+      const emptyResults: PromiseSettledResult<QuotaSnapshot>[] = [];
+      this.db.logRuntime({
+        level: "info",
+        scope: "quota-poller",
+        event: "poll.completed",
+        message: "Quota polling completed: 0 success, 0 failed",
+        detailsJson: JSON.stringify({
+          source,
+          successCount: 0,
+          failedCount: 0,
+          skippedInvalidCount: 0,
+          polledAccountId: null,
+          mode: "queue-single-account",
+        }),
+        createdAt: nowIso(),
+      });
+      this.emit("completed", emptyResults);
+      return emptyResults;
+    }
+
+    if (this.nextAccountIndex >= allAccounts.length) {
+      this.nextAccountIndex = 0;
+    }
+    const selectedIndex = this.nextAccountIndex;
+    const account = allAccounts[selectedIndex];
+    this.nextAccountIndex = (selectedIndex + 1) % allAccounts.length;
+
     this.db.logRuntime({
       level: "info",
       scope: "quota-poller",
@@ -82,14 +153,16 @@ export class QuotaPoller extends EventEmitter {
       message: `Quota polling started (${source})`,
       detailsJson: JSON.stringify({
         source,
-        accountCount: accounts.length,
-        skippedInvalidCount,
+        accountCount: allAccounts.length,
+        skippedInvalidCount: 0,
+        selectedAccountId: account.id,
+        selectedIndex,
+        nextIndex: this.nextAccountIndex,
+        mode: "queue-single-account",
       }),
       createdAt: nowIso(),
     });
-    const results = await Promise.allSettled(
-      accounts.map((account) => this.pollAccount(account, source)),
-    );
+    const results = await Promise.allSettled([this.pollAccount(account, source)]);
     const successCount = results.filter((result) => result.status === "fulfilled").length;
     const failedCount = results.length - successCount;
     this.db.logRuntime({
@@ -101,7 +174,9 @@ export class QuotaPoller extends EventEmitter {
         source,
         successCount,
         failedCount,
-        skippedInvalidCount,
+        skippedInvalidCount: 0,
+        polledAccountId: account.id,
+        mode: "queue-single-account",
       }),
       createdAt: nowIso(),
     });

@@ -19,18 +19,54 @@ type CandidateState = {
   quotaState: QuotaState;
 };
 
+type SelectionDiagnostics = {
+  enableFreeAccountScheduling: boolean;
+  isResponsesRequest: boolean;
+  excludedCount: number;
+  availableCount: number;
+  availableAfterResponsesFreezeFilterCount: number;
+  statusEligibleCount: number;
+  freeStatusEligibleCount: number;
+  paidStatusEligibleCount: number;
+  freeSchedulingFilteredCount: number;
+  filteredFreeCount: number;
+  responsesFree401FrozenCount: number;
+  missingSnapshotCount: number;
+  candidateCount: number;
+  candidateFreeCount: number;
+  candidatePaidCount: number;
+};
+
 type SelectionResult = {
   selected: CandidateState;
   scores: ScoreBreakdown[];
   reason: string;
   stickyBinding: SessionBinding | null;
   candidateCount: number;
+  diagnostics: SelectionDiagnostics;
 };
 
 const normalizePlanType = (value: string | null | undefined) =>
   value?.trim().toLowerCase() ?? "";
 
 const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
+const isResponsesPath = (path: string) =>
+  path === "/responses" ||
+  path.startsWith("/responses/") ||
+  path === "/v1/responses" ||
+  path.startsWith("/v1/responses/") ||
+  path === "/backend-api/codex/responses" ||
+  path.startsWith("/backend-api/codex/responses/");
+
+class SchedulerSelectionError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostics: SelectionDiagnostics,
+  ) {
+    super(message);
+    this.name = "SchedulerSelectionError";
+  }
+}
 
 export class Scheduler {
   constructor(
@@ -48,39 +84,45 @@ export class Scheduler {
   ) {}
 
   schedule(input: ScheduleInput): ScheduleDecision {
-    const selection = this.selectCandidate(input);
-    const reservation = this.quotaVirtualizer.reserve(
-      selection.selected.account.id,
-      input.sessionId,
-      input.requestId,
-      input.estimatedUnits,
-    );
-    const nextBinding = this.sessionManager.bind(
-      input.sessionId,
-      selection.selected.account.id,
-      Boolean(
-        selection.stickyBinding &&
-          selection.stickyBinding.accountId !== selection.selected.account.id,
-      ),
-    );
+    try {
+      const selection = this.selectCandidate(input);
+      const reservation = this.quotaVirtualizer.reserve(
+        selection.selected.account.id,
+        input.sessionId,
+        input.requestId,
+        input.estimatedUnits,
+      );
+      const nextBinding = this.sessionManager.bind(
+        input.sessionId,
+        selection.selected.account.id,
+        Boolean(
+          selection.stickyBinding &&
+            selection.stickyBinding.accountId !== selection.selected.account.id,
+        ),
+      );
 
-    this.db.logDecision({
-      requestId: input.requestId,
-      sessionId: input.sessionId,
-      selectedAccountId: selection.selected.account.id,
-      reason: selection.reason,
-      scoreJson: JSON.stringify(selection.scores),
-      createdAt: nowIso(),
-    });
+      this.db.logDecision({
+        requestId: input.requestId,
+        sessionId: input.sessionId,
+        selectedAccountId: selection.selected.account.id,
+        reason: selection.reason,
+        scoreJson: JSON.stringify(selection.scores),
+        createdAt: nowIso(),
+      });
+      this.logScheduleSelection(input, selection);
 
-    return {
-      account: selection.selected.account,
-      quotaState: selection.selected.quotaState,
-      reservation,
-      binding: nextBinding,
-      reason: selection.reason,
-      scores: selection.scores,
-    };
+      return {
+        account: selection.selected.account,
+        quotaState: selection.selected.quotaState,
+        reservation,
+        binding: nextBinding,
+        reason: selection.reason,
+        scores: selection.scores,
+      };
+    } catch (error) {
+      this.logScheduleFailure(input, error);
+      throw error;
+    }
   }
 
   preview(
@@ -115,17 +157,35 @@ export class Scheduler {
     const stickyBinding =
       binding && new Date(binding.stickyUntil).getTime() > Date.now() ? binding : null;
     const { enableFreeAccountScheduling } = getAccountAutomationSettings(this.db);
+    const isResponsesRequest = isResponsesPath(input.path);
     const availableAccounts = this.accountManager
       .listAccounts()
       .filter((account) => !excluded.has(account.id));
-    const statusEligibleAccounts = availableAccounts.filter(
+    const responsesFree401FrozenAccounts = isResponsesRequest
+      ? availableAccounts.filter((account) => this.isFree401FrozenAccount(account))
+      : [];
+    const responsesFree401FrozenAccountIds = new Set(
+      responsesFree401FrozenAccounts.map((account) => account.id),
+    );
+    const freezeFilteredAccounts =
+      responsesFree401FrozenAccountIds.size === 0
+        ? availableAccounts
+        : availableAccounts.filter((account) => !responsesFree401FrozenAccountIds.has(account.id));
+    const statusEligibleAccounts = freezeFilteredAccounts.filter(
       (account) => account.status !== "invalid" && account.status !== "cooling",
     );
+    const freeStatusEligibleCount = statusEligibleAccounts.filter((account) =>
+      isFreePlanType(account.subscription.planType),
+    ).length;
     const freeSchedulingFilteredAccounts = enableFreeAccountScheduling
       ? statusEligibleAccounts
       : statusEligibleAccounts.filter(
           (account) => !isFreePlanType(account.subscription.planType),
         );
+    const missingSnapshotCount = statusEligibleAccounts.filter(
+      (account) => this.quotaVirtualizer.getAccountQuotaState(account.id).sampleTime === null,
+    ).length;
+    const filteredFreeCount = statusEligibleAccounts.length - freeSchedulingFilteredAccounts.length;
     const candidateStates = freeSchedulingFilteredAccounts
       .map((account) => ({
         account,
@@ -134,27 +194,45 @@ export class Scheduler {
       .filter(({ account, quotaState }) =>
         this.isViable(account.status, quotaState, input.estimatedUnits),
       );
+    const candidateFreeCount = candidateStates.filter(({ account }) =>
+      isFreePlanType(account.subscription.planType),
+    ).length;
+    const diagnostics: SelectionDiagnostics = {
+      enableFreeAccountScheduling,
+      isResponsesRequest,
+      excludedCount: excluded.size,
+      availableCount: availableAccounts.length,
+      availableAfterResponsesFreezeFilterCount: freezeFilteredAccounts.length,
+      statusEligibleCount: statusEligibleAccounts.length,
+      freeStatusEligibleCount,
+      paidStatusEligibleCount: statusEligibleAccounts.length - freeStatusEligibleCount,
+      freeSchedulingFilteredCount: freeSchedulingFilteredAccounts.length,
+      filteredFreeCount,
+      responsesFree401FrozenCount: responsesFree401FrozenAccounts.length,
+      missingSnapshotCount,
+      candidateCount: candidateStates.length,
+      candidateFreeCount,
+      candidatePaidCount: candidateStates.length - candidateFreeCount,
+    };
 
     if (candidateStates.length === 0) {
       if (availableAccounts.length === 0) {
-        throw new Error(
+        throw new SchedulerSelectionError(
           "No schedulable account is available. Account pool is empty; add accounts via /admin/chatgpt-capture/start.",
+          diagnostics,
         );
       }
-
-      const missingSnapshotCount = statusEligibleAccounts.filter(
-        (account) => this.quotaVirtualizer.getAccountQuotaState(account.id).sampleTime === null,
-      ).length;
-      const filteredFreeCount = statusEligibleAccounts.length - freeSchedulingFilteredAccounts.length;
 
       if (!enableFreeAccountScheduling && filteredFreeCount > 0 && freeSchedulingFilteredAccounts.length === 0) {
-        throw new Error(
+        throw new SchedulerSelectionError(
           `No schedulable account is available. Free account scheduling is disabled and no paid account is currently routable. filtered_free=${filteredFreeCount}, estimated_units=${input.estimatedUnits}.`,
+          diagnostics,
         );
       }
 
-      throw new Error(
-        `No schedulable account is available. eligible=${statusEligibleAccounts.length}, missing_snapshot=${missingSnapshotCount}, filtered_free=${filteredFreeCount}, estimated_units=${input.estimatedUnits}.`,
+      throw new SchedulerSelectionError(
+        `No schedulable account is available. eligible=${statusEligibleAccounts.length}, missing_snapshot=${missingSnapshotCount}, filtered_free=${filteredFreeCount}, free401_frozen=${responsesFree401FrozenAccounts.length}, estimated_units=${input.estimatedUnits}.`,
+        diagnostics,
       );
     }
 
@@ -187,17 +265,63 @@ export class Scheduler {
       [...rankingCandidates].sort((left, right) =>
         this.compareByResetPriority(left, right, scoreByAccountId),
       )[0];
+    const finalReason =
+      stickyCandidate && stickyBinding?.accountId === stickyCandidate.account.id
+        ? "sticky-session"
+        : reason;
 
     return {
       selected,
       scores,
-      reason:
-        stickyCandidate && stickyBinding?.accountId === stickyCandidate.account.id
-          ? "sticky-session"
-          : reason,
+      reason: finalReason,
       stickyBinding,
       candidateCount: candidateStates.length,
+      diagnostics,
     };
+  }
+
+  private logScheduleSelection(input: ScheduleInput, selection: SelectionResult) {
+    this.db.logRuntime({
+      level: "info",
+      scope: "scheduler",
+      event: "schedule.selected",
+      message: `调度选中账号 ${selection.selected.account.id}（${selection.reason}）`,
+      accountId: selection.selected.account.id,
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      detailsJson: JSON.stringify({
+        path: input.path,
+        method: input.method,
+        estimatedUnits: input.estimatedUnits,
+        reason: selection.reason,
+        selectedAccountId: selection.selected.account.id,
+        selectedPlanType: selection.selected.account.subscription.planType,
+        stickyAccountId: selection.stickyBinding?.accountId ?? null,
+        ...selection.diagnostics,
+      }),
+      createdAt: nowIso(),
+    });
+  }
+
+  private logScheduleFailure(input: ScheduleInput, error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown scheduling error.";
+    const diagnostics = error instanceof SchedulerSelectionError ? error.diagnostics : null;
+
+    this.db.logRuntime({
+      level: "warn",
+      scope: "scheduler",
+      event: diagnostics ? "schedule.no_candidate" : "schedule.failed",
+      message,
+      requestId: input.requestId,
+      sessionId: input.sessionId,
+      detailsJson: JSON.stringify({
+        path: input.path,
+        method: input.method,
+        estimatedUnits: input.estimatedUnits,
+        ...(diagnostics ?? {}),
+      }),
+      createdAt: nowIso(),
+    });
   }
 
   private pickRankingCandidates(candidateStates: CandidateState[], estimatedUnits: number) {
@@ -371,5 +495,23 @@ export class Scheduler {
       weeklyResetInMs,
       windowResetInMs,
     };
+  }
+
+  private isFree401FrozenAccount(account: ReturnType<AccountManager["listAccounts"]>[number]) {
+    if (!isFreePlanType(account.subscription.planType)) {
+      return false;
+    }
+    if (account.status !== "cooling") {
+      return false;
+    }
+    if (account.lastErrorCode !== "upstream_401") {
+      return false;
+    }
+    if (!account.cooldownUntil) {
+      return false;
+    }
+
+    const cooldownUntilMs = new Date(account.cooldownUntil).getTime();
+    return Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now();
   }
 }

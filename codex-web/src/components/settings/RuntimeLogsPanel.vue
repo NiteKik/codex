@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { fetchRuntimeLogs, type RuntimeLog } from "../../services/settings-page-api.ts";
 import { usePagePolling } from "../../composables/use-page-polling.ts";
 import { formatDateTime as formatDateTimeValue } from "../../utils/date-time.ts";
@@ -13,6 +13,156 @@ const loading = ref(false);
 const queuedRefresh = ref(false);
 const errorMessage = ref("");
 const lastSync = ref<string | null>(null);
+const onlySchedulerLogs = ref(false);
+
+type RuntimeDetailItem = {
+  key: string;
+  label: string;
+  value: string;
+};
+
+const runtimeDetailLabels: Record<string, string> = {
+  path: "路径",
+  method: "方法",
+  estimatedUnits: "预估单位",
+  reason: "调度原因",
+  selectedAccountId: "选中账号",
+  selectedPlanType: "选中套餐",
+  stickyAccountId: "粘性账号",
+  enableFreeAccountScheduling: "免费账号调度",
+  isResponsesRequest: "Responses 请求",
+  excludedCount: "排除账号数",
+  availableCount: "可用账号数",
+  availableAfterResponsesFreezeFilterCount: "冻结过滤后可用数",
+  statusEligibleCount: "状态可调度",
+  freeStatusEligibleCount: "免费可调度",
+  paidStatusEligibleCount: "付费可调度",
+  freeSchedulingFilteredCount: "免费开关过滤后",
+  filteredFreeCount: "被过滤免费账号",
+  responsesFree401FrozenCount: "free401冻结数",
+  missingSnapshotCount: "缺失快照",
+  candidateCount: "候选账号数",
+  candidateFreeCount: "免费候选",
+  candidatePaidCount: "付费候选",
+  trigger: "触发来源",
+  threshold: "阈值",
+  batchSize: "批量补号数",
+  upstreamStatus: "上游状态码",
+  planType: "套餐类型",
+  freezeMs: "冻结时长(ms)",
+  freezeUntil: "冻结截止时间",
+};
+
+const runtimeDetailOrder = [
+  "path",
+  "method",
+  "estimatedUnits",
+  "reason",
+  "selectedAccountId",
+  "selectedPlanType",
+  "stickyAccountId",
+  "trigger",
+  "isResponsesRequest",
+  "enableFreeAccountScheduling",
+  "availableCount",
+  "availableAfterResponsesFreezeFilterCount",
+  "statusEligibleCount",
+  "candidateCount",
+  "freeStatusEligibleCount",
+  "paidStatusEligibleCount",
+  "candidateFreeCount",
+  "candidatePaidCount",
+  "freeSchedulingFilteredCount",
+  "filteredFreeCount",
+  "responsesFree401FrozenCount",
+  "missingSnapshotCount",
+  "threshold",
+  "batchSize",
+  "excludedCount",
+  "upstreamStatus",
+  "planType",
+  "freezeMs",
+  "freezeUntil",
+];
+
+const detailOrderIndex = new Map(runtimeDetailOrder.map((key, index) => [key, index]));
+
+const stringifyDetailValue = (value: unknown) => {
+  if (value === null || value === undefined) {
+    return "-";
+  }
+  if (typeof value === "boolean") {
+    return value ? "开启" : "关闭";
+  }
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? value : "-";
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const parseRuntimeDetails = (detailsJson: string | null) => {
+  if (!detailsJson) {
+    return [] as RuntimeDetailItem[];
+  }
+
+  try {
+    const parsed = JSON.parse(detailsJson) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [
+        {
+          key: "raw",
+          label: "详情",
+          value: stringifyDetailValue(parsed),
+        },
+      ];
+    }
+
+    const entries = Object.entries(parsed as Record<string, unknown>).map(([key, value]) => ({
+      key,
+      label: runtimeDetailLabels[key] ?? key,
+      value: stringifyDetailValue(value),
+    }));
+
+    return entries.sort((left, right) => {
+      const leftRank = detailOrderIndex.get(left.key) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = detailOrderIndex.get(right.key) ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return left.label.localeCompare(right.label, "zh-CN");
+    });
+  } catch {
+    return [
+      {
+        key: "raw",
+        label: "详情",
+        value: detailsJson,
+      },
+    ];
+  }
+};
+
+const visibleLogs = computed(() =>
+  onlySchedulerLogs.value
+    ? logs.value.filter((log) => log.scope === "scheduler")
+    : logs.value,
+);
+
+const visibleCountLabel = computed(
+  () => `显示 ${visibleLogs.value.length} / ${logs.value.length}`,
+);
+
+const emptyStateText = computed(() =>
+  onlySchedulerLogs.value ? "当前筛选下暂无调度日志。" : "暂无运行日志。",
+);
 
 const formatDateTime = (value: string | null) =>
   formatDateTimeValue(value, {
@@ -87,10 +237,27 @@ usePagePolling(
         <p>展示采集、调度、重试等核心运行事件，页面会每 30 秒自动刷新一次。</p>
       </div>
       <div class="runtime-panel__actions">
+        <div class="runtime-panel__filters">
+          <button
+            type="button"
+            class="runtime-filter-chip"
+            :class="{ 'runtime-filter-chip--active': !onlySchedulerLogs }"
+            @click="onlySchedulerLogs = false"
+          >
+            全部
+          </button>
+          <button
+            type="button"
+            class="runtime-filter-chip"
+            :class="{ 'runtime-filter-chip--active': onlySchedulerLogs }"
+            @click="onlySchedulerLogs = true"
+          >
+            仅调度
+          </button>
+        </div>
+        <span class="runtime-panel__sync">{{ visibleCountLabel }}</span>
         <span class="runtime-panel__sync">最近同步 {{ formatDateTime(lastSync) }}</span>
-        <button type="button" class="secondary-btn" :disabled="loading" @click="refreshLogs">
-          {{ loading ? "刷新中..." : "刷新日志" }}
-        </button>
+        <span class="runtime-panel__sync">{{ loading ? "同步中..." : "自动刷新中（30 秒）" }}</span>
       </div>
     </div>
 
@@ -99,11 +266,11 @@ usePagePolling(
     </div>
 
     <div class="runtime-log-list">
-      <template v-if="logs.length === 0 && !loading">
-        <div class="runtime-empty-card">暂无运行日志。</div>
+      <template v-if="visibleLogs.length === 0 && !loading">
+        <div class="runtime-empty-card">{{ emptyStateText }}</div>
       </template>
       <template v-else>
-        <article v-for="log in logs" :key="log.id" class="runtime-log-item">
+        <article v-for="log in visibleLogs" :key="log.id" class="runtime-log-item">
           <div class="runtime-log-item__top">
             <strong>{{ log.scope }} · {{ log.event }}</strong>
             <span
@@ -121,9 +288,19 @@ usePagePolling(
             <span>{{ formatDateTime(log.created_at) }}</span>
             <span>{{ log.account_id ? `账号 ${log.account_id}` : "全局事件" }}</span>
           </div>
-          <p v-if="log.details_json" class="runtime-log-item__details">
-            <code>{{ log.details_json }}</code>
-          </p>
+          <div
+            v-if="log.details_json"
+            class="runtime-log-item__details"
+          >
+            <span
+              v-for="detail in parseRuntimeDetails(log.details_json)"
+              :key="`${log.id}:${detail.key}`"
+              class="runtime-detail-pill"
+            >
+              <b>{{ detail.label }}</b>
+              <span>{{ detail.value }}</span>
+            </span>
+          </div>
         </article>
       </template>
     </div>
@@ -195,34 +372,36 @@ usePagePolling(
   gap: 12px;
 }
 
+.runtime-panel__filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.runtime-filter-chip {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.runtime-filter-chip--active {
+  background: rgba(216, 109, 57, 0.14);
+  color: var(--accent-strong);
+}
+
 .runtime-panel__sync {
   color: var(--muted);
   font-size: 0.9rem;
-}
-
-.secondary-btn {
-  padding: 14px 18px;
-  border: 1px solid rgba(20, 33, 61, 0.12);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.75);
-  color: var(--ink);
-  font-weight: 700;
-  cursor: pointer;
-  transition:
-    transform 180ms ease,
-    border-color 180ms ease,
-    background-color 180ms ease;
-}
-
-.secondary-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  border-color: rgba(216, 109, 57, 0.26);
-  background: rgba(255, 246, 240, 0.96);
-}
-
-.secondary-btn:disabled {
-  opacity: 0.58;
-  cursor: not-allowed;
 }
 
 .runtime-panel__error {
@@ -275,14 +454,33 @@ usePagePolling(
 }
 
 .runtime-log-item__details {
-  overflow: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.runtime-log-item__details code {
-  display: inline-block;
+.runtime-detail-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  font-size: 0.82rem;
+  line-height: 1.2;
   max-width: 100%;
-  white-space: pre-wrap;
-  word-break: break-word;
+}
+
+.runtime-detail-pill b {
+  color: rgba(20, 33, 61, 0.72);
+  font-weight: 700;
+}
+
+.runtime-detail-pill span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .runtime-tag {
@@ -320,8 +518,5 @@ usePagePolling(
     align-items: flex-start;
   }
 
-  .runtime-panel__actions .secondary-btn {
-    width: 100%;
-  }
 }
 </style>

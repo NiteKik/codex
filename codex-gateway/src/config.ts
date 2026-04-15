@@ -119,7 +119,7 @@ export const config = {
   browserExecutablePath: process.env.BROWSER_EXECUTABLE_PATH ?? "",
   managedBrowserExecutablePath:
     process.env.MANAGED_BROWSER_EXECUTABLE_PATH ?? process.env.BROWSER_EXECUTABLE_PATH ?? "",
-  pollIntervalMs: toNumber(process.env.POLL_INTERVAL_MS, 30_000),
+  pollIntervalMs: toNumber(process.env.POLL_INTERVAL_MS, 45_000),
   chatgptCaptureTimeoutMs: toNumber(process.env.CHATGPT_CAPTURE_TIMEOUT_MS, 10 * 60_000),
   chatgptCapturePollIntervalMs: toNumber(process.env.CHATGPT_CAPTURE_POLL_INTERVAL_MS, 3_000),
   autoRegisterEnabled: toBoolean(process.env.AUTO_REGISTER_ENABLED, false),
@@ -140,6 +140,7 @@ export const config = {
   tempMailSitePassword: process.env.TEMP_MAIL_SITE_PASSWORD?.trim() ?? "",
   tempMailDefaultDomain: process.env.TEMP_MAIL_DEFAULT_DOMAIN?.trim() ?? "",
   cooldownMs: toNumber(process.env.COOLDOWN_MS, 15 * 60_000),
+  free401FreezeMs: Math.max(60_000, toNumber(process.env.FREE_401_FREEZE_MS, 60 * 60_000)),
   stickyTtlMs: toNumber(process.env.SESSION_STICKY_TTL_MS, 20 * 60_000),
   maxProxyAttempts: toNumber(process.env.MAX_PROXY_ATTEMPTS, 2),
   maxConcurrentPerAccount: toNumber(process.env.MAX_CONCURRENT_PER_ACCOUNT, 4),

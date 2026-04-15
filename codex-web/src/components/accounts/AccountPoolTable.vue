@@ -1,13 +1,11 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { useRouter } from "vue-router";
 import { Separator } from "reka-ui";
 import AccountCreateForm from "./AccountCreateForm.vue";
 import AccountEditForm from "./AccountEditForm.vue";
 import AccountPoolList from "./AccountPoolList.vue";
-import AccountAutomationSettingsPanel from "./AccountAutomationSettingsPanel.vue";
 import AccountUpgradeForm from "./AccountUpgradeForm.vue";
 import { useAccountPoolTable } from "../../composables/use-account-pool-table.ts";
-import { closeDialogOnBackdropClick } from "../../composables/use-dialog-backdrop-close.ts";
 import { type AccountRow } from "../../services/gateway-api.ts";
 
 withDefaults(
@@ -23,8 +21,7 @@ withDefaults(
 const emit = defineEmits<{
   created: [];
 }>();
-const settingsDialogRef = ref<HTMLDialogElement | null>(null);
-const settingsDialogMounted = ref(false);
+const router = useRouter();
 
 const {
   actionBusyAccountId,
@@ -79,19 +76,8 @@ const {
   upgradeTargetAccount,
 } = useAccountPoolTable(() => emit("created"));
 
-const openSettingsDialog = () => {
-  if (!settingsDialogMounted.value) {
-    settingsDialogMounted.value = true;
-  }
-  settingsDialogRef.value?.showModal();
-};
-
-const closeSettingsDialog = () => {
-  settingsDialogRef.value?.close();
-};
-
-const onSettingsDialogClick = (event: MouseEvent) => {
-  closeDialogOnBackdropClick(settingsDialogRef.value, event);
+const openSettingsPage = () => {
+  void router.push("/settings");
 };
 </script>
 
@@ -103,13 +89,6 @@ const onSettingsDialogClick = (event: MouseEvent) => {
         <h2>账号池列表</h2>
       </div>
       <div class="section-actions">
-        <button
-          type="button"
-          class="secondary-btn dashboard-secondary-btn account-settings-btn"
-          @click="openSettingsDialog"
-        >
-          设置
-        </button>
         <button
           type="button"
           class="primary-btn dashboard-primary-btn account-add-btn"
@@ -209,31 +188,6 @@ const onSettingsDialogClick = (event: MouseEvent) => {
     </dialog>
 
     <dialog
-      ref="settingsDialogRef"
-      class="help-dialog account-settings-dialog"
-      @click="onSettingsDialogClick"
-    >
-      <div class="dialog-body">
-        <div class="dialog-header">
-          <div>
-            <p class="dialog-kicker">Account Settings</p>
-            <h2>自动注册与采集设置</h2>
-          </div>
-          <button
-            type="button"
-            class="dialog-close"
-            aria-label="关闭"
-            @click="closeSettingsDialog"
-          >
-            ×
-          </button>
-        </div>
-
-        <AccountAutomationSettingsPanel v-if="settingsDialogMounted" />
-      </div>
-    </dialog>
-
-    <dialog
       ref="upgradeDialogRef"
       class="help-dialog account-upgrade-dialog"
       @click="onUpgradeDialogClick"
@@ -315,9 +269,6 @@ const onSettingsDialogClick = (event: MouseEvent) => {
 }
 
 .section-kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   color: var(--accent-strong);
   font-size: 0.8rem;
   font-weight: 800;
@@ -342,7 +293,7 @@ const onSettingsDialogClick = (event: MouseEvent) => {
 }
 
 .primary-btn {
-  padding: 16px 20px;
+  padding: 8px 20px;
   border: 0;
   border-radius: 18px;
   background: linear-gradient(135deg, #d86d39 0%, #b94d1d 100%);
@@ -481,15 +432,6 @@ const onSettingsDialogClick = (event: MouseEvent) => {
 
 .account-upgrade-dialog {
   width: min(92vw, 700px);
-}
-
-.account-settings-dialog {
-  width: min(94vw, 920px);
-}
-
-.account-settings-dialog .dialog-body {
-  max-height: min(86vh, 900px);
-  overflow: auto;
 }
 
 @media (max-width: 920px) {

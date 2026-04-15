@@ -26,12 +26,9 @@ export const useSettingsPage = () => {
   const tokenFilePath = ref("");
   const tokenHeader = ref("");
   const tokenSnippetProvider = ref("");
-  const tokenSnippetOpenai = ref("");
   const tokenSetxCommand = ref("");
   const tokenSessionCommand = ref("");
-  const openaiModeCompatible = ref(false);
   const providerModeDiff = ref("");
-  const openaiModeDiff = ref("");
   const pollIntervalLoading = ref(false);
   const pollIntervalSaving = ref(false);
   const pollIntervalError = ref("");
@@ -67,16 +64,7 @@ export const useSettingsPage = () => {
   const codexAutoConfigSaving = ref(false);
   const codexAutoConfigEnabled = ref(false);
   const codexAutoConfigActive = ref(false);
-  const codexAutoConfigMode = ref<
-    "provider_auth" | "provider_env" | "openai_base_url" | "openai_base_url_no_forced"
-  >("openai_base_url");
-  const codexAutoConfigModeInput = ref<
-    "provider_auth" | "provider_env" | "openai_base_url" | "openai_base_url_no_forced"
-  >("openai_base_url");
-  const codexAutoConfigResolvedMode = ref<
-    "provider_auth" | "provider_env" | "openai_base_url" | "openai_base_url_no_forced"
-  >("openai_base_url");
-  const codexAutoConfigBunAvailable = ref(true);
+  const codexAutoConfigModeInput = ref<"provider_auth" | "provider_env">("provider_env");
   const codexAutoConfigConfigPath = ref("");
   const codexAutoConfigBackupPath = ref("");
   const codexAutoConfigBackupExists = ref(false);
@@ -105,17 +93,12 @@ export const useSettingsPage = () => {
       tokenHeader.value = payload.authHeader ?? "";
       const envVarName = payload.codexEnvVar ?? "QUOTA_GATEWAY_TOKEN";
       tokenSnippetProvider.value = payload.providerConfigSnippet ?? payload.codexConfigSnippet ?? "";
-      tokenSnippetOpenai.value = payload.openaiBaseUrlConfigSnippet ?? "";
       tokenSetxCommand.value =
         payload.windowsSetxCommand ?? `setx ${envVarName} "${payload.token ?? ""}"`;
       tokenSessionCommand.value =
         payload.windowsSessionCommand ?? `$env:${envVarName} = "${payload.token ?? ""}"`;
-      openaiModeCompatible.value = Boolean(payload.openaiBaseUrlCompatible);
       providerModeDiff.value =
-        payload.strategyDiff?.providerMode ?? "需要 env_key token，会切到自定义 provider。";
-      openaiModeDiff.value =
-        payload.strategyDiff?.openaiBaseUrlMode ??
-        "保持 openai provider 历史上下文；通常需要网关关闭 token 强制校验。";
+        payload.strategyDiff?.providerMode ?? "通过 env_key 读取网关 token，无需命令鉴权。";
     } catch (error) {
       tokenError.value = error instanceof Error ? error.message : "Token 读取失败。";
     } finally {
@@ -324,10 +307,7 @@ export const useSettingsPage = () => {
     copyText(tokenHeader.value, "Authorization Header 已复制。");
 
   const copyProviderSnippet = async () =>
-    copyText(tokenSnippetProvider.value, "方案 A 配置片段已复制。");
-
-  const copyOpenaiSnippet = async () =>
-    copyText(tokenSnippetOpenai.value, "方案 B 配置片段已复制。");
+    copyText(tokenSnippetProvider.value, "配置片段已复制。");
 
   const copySetxCommand = async () => copyText(tokenSetxCommand.value, "setx 命令已复制。");
 
@@ -339,12 +319,7 @@ export const useSettingsPage = () => {
   ) => {
     codexAutoConfigEnabled.value = Boolean(payload.enabled);
     codexAutoConfigActive.value = Boolean(payload.active);
-    const rawMode = payload.mode ?? "openai_base_url";
-    codexAutoConfigMode.value = rawMode;
-    codexAutoConfigModeInput.value =
-      rawMode === "provider_auth" || rawMode === "provider_env" ? "openai_base_url" : rawMode;
-    codexAutoConfigResolvedMode.value = payload.resolvedMode ?? rawMode;
-    codexAutoConfigBunAvailable.value = payload.bunAvailable ?? true;
+    codexAutoConfigModeInput.value = "provider_env";
     codexAutoConfigConfigPath.value = payload.configPath ?? "";
     codexAutoConfigBackupPath.value = payload.backupPath ?? "";
     codexAutoConfigBackupExists.value = Boolean(payload.backupExists);
@@ -373,17 +348,19 @@ export const useSettingsPage = () => {
     }
   };
 
-  const toggleCodexAutoConfig = async () => {
+  const toggleCodexAutoConfig = async (nextValue?: boolean) => {
     if (codexAutoConfigSaving.value) {
       return;
     }
 
+    const previousValue = codexAutoConfigEnabled.value;
+    const nextEnabled = typeof nextValue === "boolean" ? nextValue : !previousValue;
+    codexAutoConfigEnabled.value = nextEnabled;
     codexAutoConfigSaving.value = true;
     codexAutoConfigError.value = "";
     codexAutoConfigFeedback.value = "";
 
     try {
-      const nextEnabled = !codexAutoConfigEnabled.value;
       const payload = await updateCodexAutoConfigStatus(
         activeBaseUrl.value,
         nextEnabled,
@@ -394,33 +371,9 @@ export const useSettingsPage = () => {
         ? "自动配置已开启：已备份并接管 ~/.codex/config.toml。"
         : "自动配置已关闭：已还原 ~/.codex/config.toml。";
     } catch (error) {
+      codexAutoConfigEnabled.value = previousValue;
       codexAutoConfigError.value =
         error instanceof Error ? error.message : "自动配置更新失败。";
-    } finally {
-      codexAutoConfigSaving.value = false;
-    }
-  };
-
-  const saveCodexAutoConfigMode = async () => {
-    if (codexAutoConfigSaving.value) {
-      return;
-    }
-
-    codexAutoConfigSaving.value = true;
-    codexAutoConfigError.value = "";
-    codexAutoConfigFeedback.value = "";
-
-    try {
-      const payload = await updateCodexAutoConfigStatus(
-        activeBaseUrl.value,
-        codexAutoConfigEnabled.value,
-        codexAutoConfigModeInput.value,
-      );
-      applyCodexAutoConfigStatus(payload);
-      codexAutoConfigFeedback.value = "自动配置模式已更新。";
-    } catch (error) {
-      codexAutoConfigError.value =
-        error instanceof Error ? error.message : "自动配置模式更新失败。";
     } finally {
       codexAutoConfigSaving.value = false;
     }
@@ -480,10 +433,7 @@ export const useSettingsPage = () => {
     codexAutoConfigLastAppliedAt,
     codexAutoConfigLastError,
     codexAutoConfigLoading,
-    codexAutoConfigMode,
     codexAutoConfigModeInput,
-    codexAutoConfigResolvedMode,
-    codexAutoConfigBunAvailable,
     codexAutoConfigSaving,
     automationError,
     automationFeedback,
@@ -491,7 +441,6 @@ export const useSettingsPage = () => {
     baseUrlInput,
     copyGatewayHeader,
     copyGatewayToken,
-    copyOpenaiSnippet,
     copyProviderSnippet,
     copySessionCommand,
     copySetxCommand,
@@ -499,8 +448,6 @@ export const useSettingsPage = () => {
     loadGatewaySettings,
     loadGatewayToken,
     managedBrowserExecutablePathInput,
-    openaiModeCompatible,
-    openaiModeDiff,
     pollIntervalError,
     pollIntervalFeedback,
     pollIntervalInput,
@@ -518,7 +465,6 @@ export const useSettingsPage = () => {
     tempMailDefaultDomainInput,
     tempMailSitePasswordInput,
     toggleCodexAutoConfig,
-    saveCodexAutoConfigMode,
     tokenCopiedFeedback,
     tokenError,
     tokenFilePath,
@@ -527,7 +473,6 @@ export const useSettingsPage = () => {
     tokenRequired,
     tokenSessionCommand,
     tokenSetxCommand,
-    tokenSnippetOpenai,
     tokenSnippetProvider,
     tokenSource,
     tokenValue,

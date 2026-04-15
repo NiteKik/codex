@@ -270,29 +270,6 @@ const readOptionalPositiveInt = (
   return Math.min(max, Math.max(1, Math.floor(parsed)));
 };
 
-const parseRequiredPollIntervalSeconds = (
-  source: Record<string, unknown>,
-  key: string,
-  minSeconds: number,
-  maxSeconds: number,
-) => {
-  if (!hasOwn(source, key)) {
-    throw new Error(`Field "${key}" is required.`);
-  }
-
-  const raw = source[key];
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
-    throw new Error(`Field "${key}" must be an integer.`);
-  }
-
-  if (parsed < minSeconds || parsed > maxSeconds) {
-    throw new Error(`Field "${key}" must be between ${minSeconds} and ${maxSeconds}.`);
-  }
-
-  return parsed;
-};
-
 const parseOptionalTtlSeconds = (source: Record<string, unknown>, key: string) => {
   if (!hasOwn(source, key)) {
     return null;
@@ -348,6 +325,24 @@ const normalizePlanType = (value: string | null | undefined) =>
   value?.trim().toLowerCase() ?? "";
 
 const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
+const compactMessage = (value: string) => value.replaceAll(/\s+/g, "").toLowerCase();
+const isCdkSessionErrorMessage = (message: string) => {
+  const compact = compactMessage(message);
+  if (!compact) {
+    return false;
+  }
+
+  return [
+    "session信息或账号异常",
+    "session过期失效",
+    "session",
+    "该账号当前状态为工作空间workspace",
+    "账号可能停用",
+    "账号异常",
+    "账号缺少可用session信息",
+    "账号缺少可用accesstoken",
+  ].some((pattern) => compact.includes(pattern));
+};
 
 const inferPlanTypeFromProductType = (productType: string) => {
   const normalized = productType.trim().toLowerCase();
@@ -598,13 +593,17 @@ const parseAccountPayload = (
 };
 
 export const createGatewayRuntime = () => {
-  const pollIntervalMinSeconds = 5;
-  const pollIntervalMaxSeconds = 3600;
+  const fixedPollIntervalSeconds = 45;
+  const fixedPollIntervalMs = fixedPollIntervalSeconds * 1000;
   const db = new GatewayDatabase(config.dbFile);
   db.init();
   const tokenManager = new GatewayTokenManager(db, config.gatewayAccessToken);
 
-  const accountManager = new AccountManager(db, config.cooldownMs);
+  const accountManager = new AccountManager(
+    db,
+    config.cooldownMs,
+    config.free401FreezeMs,
+  );
   const provider = new GenericHttpProvider();
   const sessionManager = new SessionManager(db, config.stickyTtlMs);
   const quotaVirtualizer = new QuotaVirtualizer(db);
@@ -621,7 +620,6 @@ export const createGatewayRuntime = () => {
     config.preemptiveWeeklyReserveUnits,
     config.preemptiveWindowReserveUnits,
   );
-  const configuredPollIntervalMs = db.getPollIntervalMs() ?? config.pollIntervalMs;
   const sessionRefreshManager = new ChatgptSessionRefreshManager(
     join(config.browserProfileDir, "managed-refresh"),
     db,
@@ -631,7 +629,7 @@ export const createGatewayRuntime = () => {
     db,
     accountManager,
     provider,
-    configuredPollIntervalMs,
+    fixedPollIntervalMs,
     sessionRefreshManager,
   );
   const chatgptCaptureManager = new ChatgptCaptureManager(config.browserProfileDir);
@@ -643,7 +641,6 @@ export const createGatewayRuntime = () => {
   );
   const codexConfigAutoManager = new CodexConfigAutoManager(db, {
     gatewayPort: config.gatewayPort,
-    gatewayWorkingDir: process.cwd(),
   });
   codexConfigAutoManager.initialize();
   const autoRegisterReplenisher = new AccountAutoRegisterReplenisher(
@@ -757,17 +754,7 @@ export const createGatewayRuntime = () => {
   });
 
   const shouldRequireGatewayAccessToken = () => {
-    if (!config.requireGatewayAccessToken) {
-      return false;
-    }
-    const status = codexConfigAutoManager.getStatus();
-    if (!status.enabled) {
-      return true;
-    }
-    return !(
-      status.resolvedMode === "openai_base_url" ||
-      status.resolvedMode === "openai_base_url_no_forced"
-    );
+    return config.requireGatewayAccessToken;
   };
 
   app.addHook("onRequest", (request, reply, done) => {
@@ -820,18 +807,19 @@ export const createGatewayRuntime = () => {
     ok: true,
     service: "quota-gateway",
     pollIntervalMs: poller.getIntervalMs(),
+    pollingEnabled: true,
   }));
 
   app.get("/admin/settings", async () => {
-    const intervalMs = poller.getIntervalMs();
     const automationSettings = getAccountAutomationSettings(db);
     return {
       ok: true,
-      pollIntervalMs: intervalMs,
-      pollIntervalSeconds: Math.floor(intervalMs / 1000),
+      pollIntervalMs: fixedPollIntervalMs,
+      pollIntervalSeconds: fixedPollIntervalSeconds,
+      pollingEnabled: true,
       pollIntervalRange: {
-        minSeconds: pollIntervalMinSeconds,
-        maxSeconds: pollIntervalMaxSeconds,
+        minSeconds: fixedPollIntervalSeconds,
+        maxSeconds: fixedPollIntervalSeconds,
       },
       tempMailBaseUrl: automationSettings.tempMailBaseUrl,
       tempMailAdminPassword: automationSettings.tempMailAdminPassword,
@@ -860,15 +848,20 @@ export const createGatewayRuntime = () => {
     try {
       const body = isRecord(request.body) ? request.body : {};
       const currentSettings = getAccountAutomationSettings(db);
-      const pollIntervalSeconds = parseRequiredPollIntervalSeconds(
-        body,
-        "pollIntervalSeconds",
-        pollIntervalMinSeconds,
-        pollIntervalMaxSeconds,
-      );
-      const pollIntervalMs = pollIntervalSeconds * 1000;
-      db.setPollIntervalMs(pollIntervalMs);
-      poller.setIntervalMs(pollIntervalMs);
+      const pollIntervalConfigRequested =
+        hasOwn(body, "pollIntervalSeconds") || hasOwn(body, "pollingEnabled");
+      if (pollIntervalConfigRequested) {
+        db.logRuntime({
+          level: "info",
+          scope: "settings",
+          event: "settings.poll_interval_ignored",
+          message: "采集频率为固定 45 秒，忽略手动频率配置请求",
+          detailsJson: JSON.stringify({
+            fixedPollIntervalSeconds,
+          }),
+          createdAt: new Date().toISOString(),
+        });
+      }
       const tempMailBaseUrl = readOptionalString(
         body,
         "tempMailBaseUrl",
@@ -933,6 +926,28 @@ export const createGatewayRuntime = () => {
         Math.floor(currentSettings.autoRegisterTimeoutMs / 1000),
         accountAutomationRanges.timeoutSeconds.max,
       );
+      const nextAutoRegisterCheckIntervalMs = Math.max(
+        accountAutomationRanges.checkIntervalSeconds.min * 1000,
+        autoRegisterCheckIntervalSeconds * 1000,
+      );
+      const nextAutoRegisterTimeoutMs = Math.max(
+        accountAutomationRanges.timeoutSeconds.min * 1000,
+        autoRegisterTimeoutSeconds * 1000,
+      );
+      const autoRegisterConfigChanged =
+        tempMailBaseUrl !== currentSettings.tempMailBaseUrl ||
+        tempMailAdminPassword !== currentSettings.tempMailAdminPassword ||
+        tempMailSitePassword !== currentSettings.tempMailSitePassword ||
+        tempMailDefaultDomain !== currentSettings.tempMailDefaultDomain ||
+        managedBrowserExecutablePath !== currentSettings.managedBrowserExecutablePath ||
+        autoRegisterThreshold !== currentSettings.autoRegisterThreshold ||
+        autoRegisterBatchSize !== currentSettings.autoRegisterBatchSize ||
+        nextAutoRegisterCheckIntervalMs !== currentSettings.autoRegisterCheckIntervalMs ||
+        nextAutoRegisterTimeoutMs !== currentSettings.autoRegisterTimeoutMs ||
+        autoRegisterHeadless !== currentSettings.autoRegisterHeadless;
+      const shouldRunAutoRegisterNow =
+        autoRegisterEnabled &&
+        (!currentSettings.autoRegisterEnabled || autoRegisterConfigChanged);
       const automationSettings = updateAccountAutomationSettings(db, {
         tempMailBaseUrl,
         tempMailAdminPassword,
@@ -946,23 +961,20 @@ export const createGatewayRuntime = () => {
           autoRegisterThreshold,
         ),
         autoRegisterBatchSize: Math.max(accountAutomationRanges.batchSize.min, autoRegisterBatchSize),
-        autoRegisterCheckIntervalMs: Math.max(
-          accountAutomationRanges.checkIntervalSeconds.min * 1000,
-          autoRegisterCheckIntervalSeconds * 1000,
-        ),
-        autoRegisterTimeoutMs: Math.max(
-          accountAutomationRanges.timeoutSeconds.min * 1000,
-          autoRegisterTimeoutSeconds * 1000,
-        ),
+        autoRegisterCheckIntervalMs: nextAutoRegisterCheckIntervalMs,
+        autoRegisterTimeoutMs: nextAutoRegisterTimeoutMs,
         autoRegisterHeadless,
       });
       autoRegisterReplenisher.start();
-      void autoRegisterReplenisher.runOnce("settings");
+      if (shouldRunAutoRegisterNow) {
+        void autoRegisterReplenisher.runOnce("settings");
+      }
 
       return {
         ok: true,
-        pollIntervalMs,
-        pollIntervalSeconds,
+        pollIntervalMs: fixedPollIntervalMs,
+        pollIntervalSeconds: fixedPollIntervalSeconds,
+        pollingEnabled: true,
         tempMailBaseUrl: automationSettings.tempMailBaseUrl,
         tempMailAdminPassword: automationSettings.tempMailAdminPassword,
         tempMailSitePassword: automationSettings.tempMailSitePassword,
@@ -1002,14 +1014,9 @@ export const createGatewayRuntime = () => {
 
       if (hasOwn(body, "mode")) {
         const mode = String(body.mode);
-        if (
-          mode !== "provider_auth" &&
-          mode !== "provider_env" &&
-          mode !== "openai_base_url" &&
-          mode !== "openai_base_url_no_forced"
-        ) {
+        if (mode !== "provider_auth" && mode !== "provider_env") {
           throw new Error(
-            'Field "mode" must be "provider_auth", "provider_env", "openai_base_url", or "openai_base_url_no_forced".',
+            'Field "mode" must be "provider_auth" or "provider_env".',
           );
         }
         codexConfigAutoManager.setMode(mode);
@@ -1032,26 +1039,16 @@ export const createGatewayRuntime = () => {
   app.get("/admin/access-token", async () => {
     const baseUrl = `http://127.0.0.1:${config.gatewayPort}`;
     const envVarName = "QUOTA_GATEWAY_TOKEN";
+    const providerId = "quota_gateway_auto_switch_managed";
     const requireGatewayAccessToken = shouldRequireGatewayAccessToken();
     const codexConfigSnippet = [
-      'model_provider = "quota_gateway"',
+      `model_provider = "${providerId}"`,
       "",
-      "[model_providers.quota_gateway]",
+      `[model_providers.${providerId}]`,
       'name = "Local Quota Gateway"',
       `base_url = "${baseUrl}"`,
       `env_key = "${envVarName}"`,
-      "",
-      "# 可选：如协议不匹配再启用",
-      '# wire_api = "responses"',
     ].join("\n");
-    const openaiBaseUrlSnippet = [
-      `openai_base_url = "${baseUrl}"`,
-      'forced_login_method = "chatgpt"',
-      "",
-      '# 为了保留原有历史会话，请保持默认 model_provider = "openai"',
-      '# 该方案下不要设置 model_provider = "quota_gateway"',
-    ].join("\n");
-
     return {
       ok: true,
       required: requireGatewayAccessToken,
@@ -1067,12 +1064,13 @@ export const createGatewayRuntime = () => {
       codexBaseUrl: baseUrl,
       codexConfigSnippet,
       providerConfigSnippet: codexConfigSnippet,
-      openaiBaseUrlConfigSnippet: openaiBaseUrlSnippet,
-      openaiBaseUrlCompatible: !requireGatewayAccessToken,
+      openaiBaseUrlConfigSnippet: "",
+      openaiBaseUrlCompatible: false,
       strategyDiff: {
-        providerMode: "需要通过 env_key 提供 token；会切换到自定义 provider 命名空间。",
+        providerMode:
+          "推荐方案。切换到自定义 provider 并通过 env_key 读取网关 token。",
         openaiBaseUrlMode:
-          "保持内置 openai provider 的命名空间与历史会话。要求网关关闭 token 强校验（REQUIRE_GATEWAY_ACCESS_TOKEN=0）。",
+          "已弃用：openai_base_url / forced_login_method 在新版本 Codex schema 中不再可用。",
       },
     };
   });
@@ -1635,16 +1633,7 @@ export const createGatewayRuntime = () => {
         });
       }
 
-      let activation: CdkActivationResult;
-      if (specifiedCdkey) {
-        activation = await cdkActivationService.activateWithSpecifiedCdk({
-          account: existing,
-          cdkey: specifiedCdkey,
-          productType: requestedProductType || undefined,
-          sessionInfo,
-          force,
-        });
-      } else {
+      if (!specifiedCdkey) {
         const availableCount = await cdkActivationService.countAvailableCdks(productType);
         if (availableCount <= 0) {
           return reply.status(409).send({
@@ -1652,13 +1641,96 @@ export const createGatewayRuntime = () => {
             message: `当前暂无可用 ${productType} CDK。`,
           });
         }
+      }
 
-        activation = await cdkActivationService.activateWithAvailableCdk({
-          account: existing,
+      const activateWithAccount = async (account: Account, inputSessionInfo: string | null) => {
+        if (specifiedCdkey) {
+          return cdkActivationService.activateWithSpecifiedCdk({
+            account,
+            cdkey: specifiedCdkey,
+            productType: requestedProductType || undefined,
+            sessionInfo: inputSessionInfo,
+            force,
+          });
+        }
+
+        return cdkActivationService.activateWithAvailableCdk({
+          account,
           productType,
-          sessionInfo,
+          sessionInfo: inputSessionInfo,
           force,
         });
+      };
+
+      let activation: CdkActivationResult;
+      try {
+        activation = await activateWithAccount(existing, sessionInfo);
+      } catch (error) {
+        const activationMessage = error instanceof Error ? error.message : "账号升级失败。";
+        const latestAccount = accountManager.getAccount(accountId);
+        const refreshManager = sessionRefreshManager;
+        if (
+          !isCdkSessionErrorMessage(activationMessage) ||
+          !latestAccount ||
+          !refreshManager ||
+          !refreshManager.canRefreshAccount(latestAccount)
+        ) {
+          throw error;
+        }
+
+        db.logRuntime({
+          level: "warn",
+          scope: "cdk-activation",
+          event: "activation.session_refresh_started",
+          message: "升级检测到 session 失效，开始自动刷新登录态",
+          accountId,
+          detailsJson: JSON.stringify({
+            reason: "cdk-upgrade-session-invalid",
+            activationMessage,
+          }),
+          createdAt: new Date().toISOString(),
+        });
+
+        try {
+          await refreshManager.refreshAccountSession(accountId, {
+            reason: "cdk-upgrade-session-invalid",
+          });
+        } catch (refreshError) {
+          const refreshMessage =
+            refreshError instanceof Error ? refreshError.message : "自动刷新 session 失败。";
+          db.logRuntime({
+            level: "warn",
+            scope: "cdk-activation",
+            event: "activation.session_refresh_failed",
+            message: refreshMessage,
+            accountId,
+            detailsJson: JSON.stringify({
+              reason: "cdk-upgrade-session-invalid",
+            }),
+            createdAt: new Date().toISOString(),
+          });
+          throw new Error(`升级检测到 session 失效，自动刷新失败：${refreshMessage}`);
+        }
+
+        const refreshedAccount = accountManager.getAccount(accountId);
+        if (!refreshedAccount) {
+          throw new Error(`Account ${accountId} 不存在，无法继续升级。`);
+        }
+
+        db.logRuntime({
+          level: "info",
+          scope: "cdk-activation",
+          event: "activation.session_refreshed_retry",
+          message: "登录态刷新完成，正在重试升级",
+          accountId,
+          detailsJson: JSON.stringify({
+            reason: "cdk-upgrade-session-invalid",
+          }),
+          createdAt: new Date().toISOString(),
+        });
+
+        // Retry once with refreshed account token/workspace, ignoring stale incoming sessionInfo.
+        activation = await activateWithAccount(refreshedAccount, null);
       }
 
       const inferredPlanType = inferPlanTypeFromProductType(activation.productType);
@@ -1667,6 +1739,42 @@ export const createGatewayRuntime = () => {
           planType: inferredPlanType,
           status: "active",
         });
+      }
+
+      const upgradedAccount = accountManager.getAccount(accountId);
+      if (upgradedAccount) {
+        const needsUnfreeze =
+          upgradedAccount.status !== "healthy" ||
+          upgradedAccount.cooldownUntil !== null ||
+          upgradedAccount.lastErrorCode !== null ||
+          upgradedAccount.lastErrorMessage !== null ||
+          upgradedAccount.consecutiveFailures > 0 ||
+          upgradedAccount.consecutive429 > 0;
+        if (needsUnfreeze) {
+          accountManager.upsertAccount({
+            ...upgradedAccount,
+            status: "healthy",
+            cooldownUntil: null,
+            consecutiveFailures: 0,
+            consecutive429: 0,
+            lastErrorCode: null,
+            lastErrorMessage: null,
+            updatedAt: new Date().toISOString(),
+          });
+          db.logRuntime({
+            level: "info",
+            scope: "cdk-activation",
+            event: "activation.unfrozen_after_upgrade",
+            message: "升级成功后解除账号冻结/异常状态",
+            accountId,
+            detailsJson: JSON.stringify({
+              previousStatus: upgradedAccount.status,
+              previousCooldownUntil: upgradedAccount.cooldownUntil,
+              previousLastErrorCode: upgradedAccount.lastErrorCode,
+            }),
+            createdAt: new Date().toISOString(),
+          });
+        }
       }
 
       await refreshQuotaForAccount(accountId, "cdk-upgrade-immediate");

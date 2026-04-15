@@ -30,6 +30,34 @@ const emailSelectors = [
   "input[name='username']",
   "input[autocomplete='email']",
 ];
+const continueWithEmailSelectors = [
+  "button:has-text('Continue with email')",
+  "button:has-text('Continue with email address')",
+  "a:has-text('Continue with email')",
+  "a:has-text('Continue with email address')",
+  "button:has-text('使用邮箱继续')",
+  "button:has-text('继续使用邮箱')",
+  "button:has-text('继续使用电子邮件地址登录')",
+  "button:has-text('继续使用邮箱地址登录')",
+  "button:has-text('继续使用工作电子邮件地址登录')",
+  "[role='button']:has-text('继续使用电子邮件地址登录')",
+  "[role='button']:has-text('继续使用邮箱地址登录')",
+  "[role='button']:has-text('继续使用邮箱')",
+];
+const phoneEntrySelectors = [
+  "input[type='tel']",
+  "input[inputmode='tel']",
+  "input[autocomplete='tel']",
+  "input[placeholder*='Phone']",
+  "input[placeholder*='phone']",
+  "input[placeholder*='手机号']",
+  "input[aria-label*='Phone']",
+  "input[aria-label*='phone']",
+  "input[aria-label*='手机号']",
+  "button:has-text('国家')",
+  "button:has-text('国家/地区')",
+  "button:has-text('日本 +(81)')",
+];
 const signupEntrySelectors = [
   "[data-testid='signup-button']",
   "button:has-text('免费注册')",
@@ -95,9 +123,12 @@ const profileFullNameSelectors = [
 const profileAgeSelectors = [
   "input[name='age']",
   "input[name*='age']",
+  "input[id*='age']",
   "input[type='number'][name*='age']",
   "input[placeholder*='Age']",
   "input[placeholder*='age']",
+  "input[aria-label*='How old']",
+  "input[aria-label*='how old']",
   "input[aria-label*='Age']",
   "input[aria-label*='age']",
   "input[placeholder*='年龄']",
@@ -105,12 +136,59 @@ const profileAgeSelectors = [
   "input[inputmode='numeric'][placeholder*='年龄']",
   "input[inputmode='numeric'][aria-label*='年龄']",
 ];
+const profileAgeSelectSelectors = ["select[name*='age']", "select[id*='age']"];
+const profileBirthdayFieldSelectors = [
+  "input[name='birthdate']",
+  "input[name='birthday']",
+  "input[autocomplete='bday']",
+  "input[autocomplete='bday-day']",
+  "input[autocomplete='bday-month']",
+  "input[autocomplete='bday-year']",
+  "input[name*='birth'][name*='date']",
+  "input[name*='birth'][name*='day']",
+  "input[name*='birth'][name*='month']",
+  "input[name*='birth'][name*='year']",
+  "input[id*='birth'][id*='date']",
+  "input[id*='birth'][id*='day']",
+  "input[id*='birth'][id*='month']",
+  "input[id*='birth'][id*='year']",
+  "input[placeholder*='Date of birth']",
+  "input[placeholder*='date of birth']",
+  "input[placeholder*='Birthday']",
+  "input[placeholder*='birthday']",
+  "input[placeholder*='出生']",
+  "input[placeholder*='生日']",
+  "input[placeholder*='YYYY']",
+  "input[placeholder*='MM']",
+  "input[placeholder*='DD']",
+  "input[aria-label*='Date of birth']",
+  "input[aria-label*='date of birth']",
+  "input[aria-label*='Birthday']",
+  "input[aria-label*='birthday']",
+  "input[aria-label*='出生']",
+  "input[aria-label*='生日']",
+];
+const profileBirthdaySpinbuttonSelectors = [
+  "[role='spinbutton'][data-type='year']",
+  "[role='spinbutton'][data-type='month']",
+  "[role='spinbutton'][data-type='day']",
+  "[role='spinbutton'][aria-label*='Year']",
+  "[role='spinbutton'][aria-label*='Month']",
+  "[role='spinbutton'][aria-label*='Day']",
+  "[role='spinbutton'][aria-label*='year']",
+  "[role='spinbutton'][aria-label*='month']",
+  "[role='spinbutton'][aria-label*='day']",
+  "[role='spinbutton'][aria-label*='年']",
+  "[role='spinbutton'][aria-label*='月']",
+  "[role='spinbutton'][aria-label*='日']",
+];
 const profileSelectors = [
   ...profileFirstNameSelectors,
   ...profileFullNameSelectors,
   ...profileAgeSelectors,
-  "input[name='birthdate']",
-  "input[name='birthday']",
+  ...profileAgeSelectSelectors,
+  ...profileBirthdayFieldSelectors,
+  ...profileBirthdaySpinbuttonSelectors,
 ];
 const primaryActionSelectors = [
   "button[type='submit']",
@@ -305,10 +383,32 @@ const pageText = async (page: Page) => {
 
 const isVisible = async (page: Page, selector: string) => {
   try {
-    const locator = page.locator(selector).first();
-    return (await locator.count()) > 0 && (await locator.isVisible());
+    const locator = page.locator(selector);
+    const count = await locator.count();
+    for (let index = 0; index < count; index += 1) {
+      if (await locator.nth(index).isVisible()) {
+        return true;
+      }
+    }
+    return false;
   } catch {
     return false;
+  }
+};
+
+const findFirstVisibleLocator = async (page: Page, selector: string) => {
+  try {
+    const locator = page.locator(selector);
+    const count = await locator.count();
+    for (let index = 0; index < count; index += 1) {
+      const candidate = locator.nth(index);
+      if (await candidate.isVisible()) {
+        return candidate;
+      }
+    }
+    return null;
+  } catch {
+    return null;
   }
 };
 
@@ -339,8 +439,8 @@ const typeIntoLocator = async (locator: Locator, value: string) => {
 const fillFirstVisible = async (page: Page, selectors: string[], value: string) => {
   for (const selector of selectors) {
     try {
-      const locator = page.locator(selector).first();
-      if ((await locator.count()) > 0 && (await locator.isVisible())) {
+      const locator = await findFirstVisibleLocator(page, selector);
+      if (locator) {
         await typeIntoLocator(locator, value);
         return true;
       }
@@ -355,8 +455,8 @@ const fillFirstVisible = async (page: Page, selectors: string[], value: string) 
 const clickFirstVisible = async (page: Page, selectors: string[]) => {
   for (const selector of selectors) {
     try {
-      const locator = page.locator(selector).first();
-      if ((await locator.count()) > 0 && (await locator.isVisible())) {
+      const locator = await findFirstVisibleLocator(page, selector);
+      if (locator) {
         await locator.scrollIntoViewIfNeeded().catch(() => undefined);
         try {
           await locator.click({ delay: 80 + Math.floor(Math.random() * 80) });
@@ -364,6 +464,217 @@ const clickFirstVisible = async (page: Page, selectors: string[]) => {
           await locator.click({ force: true });
         }
         return true;
+      }
+    } catch {
+      // keep trying
+    }
+  }
+
+  return false;
+};
+
+const hasMeaningfulInputValue = (value: string, minDigits = 6) =>
+  value.replaceAll(/\D/g, "").length >= minDigits;
+
+const primeInputForTyping = async (page: Page, locator: Locator) => {
+  await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+  await locator.hover().catch(() => undefined);
+  try {
+    await locator.click({ delay: 90 + Math.floor(Math.random() * 60) });
+  } catch {
+    await locator.click({ force: true }).catch(() => undefined);
+  }
+  await page.waitForTimeout(120);
+  await locator.press("ArrowRight").catch(() => undefined);
+  await page.waitForTimeout(80);
+};
+
+const setHiddenBirthdayValue = async (page: Page, birthdate: string) => {
+  try {
+    return await page.evaluate((value) => {
+      const doc = (globalThis as { document?: { querySelector(selector: string): unknown } }).document;
+      const target = doc?.querySelector("input[name='birthday'], input[name='birthdate']") as
+        | {
+            value?: string;
+            dispatchEvent?: (event: { type?: string }) => boolean;
+            blur?: () => void;
+          }
+        | undefined;
+      if (!target || typeof target !== "object") {
+        return false;
+      }
+
+      const prototype = Object.getPrototypeOf(target) as {
+        value?: { set?: (this: { value?: string }, v: string) => void };
+      };
+      prototype.value?.set?.call(target, value);
+      target.dispatchEvent?.(new Event("input", { bubbles: true }));
+      target.dispatchEvent?.(new Event("change", { bubbles: true }));
+      target.blur?.();
+      return true;
+    }, birthdate);
+  } catch {
+    return false;
+  }
+};
+
+const tryFillInputWithCandidates = async (
+  page: Page,
+  selectors: string[],
+  candidates: string[],
+  options?: {
+    minDigits?: number;
+  },
+) => {
+  const minDigits = Math.max(1, options?.minDigits ?? 6);
+  for (const selector of selectors) {
+    try {
+      const locator = await findFirstVisibleLocator(page, selector);
+      if (!locator) {
+        continue;
+      }
+
+      await primeInputForTyping(page, locator).catch(() => undefined);
+      for (const candidate of candidates) {
+        const next = candidate.trim();
+        if (!next) {
+          continue;
+        }
+
+        await primeInputForTyping(page, locator).catch(() => undefined);
+        await locator.fill("").catch(() => undefined);
+        await locator.fill(next).catch(() => undefined);
+        await locator.press("Tab").catch(() => undefined);
+        await page.waitForTimeout(60);
+        const filledByFill = await locator.inputValue().catch(() => "");
+        if (hasMeaningfulInputValue(filledByFill, minDigits)) {
+          return true;
+        }
+
+        await typeIntoLocator(locator, next).catch(() => undefined);
+        await locator.press("Tab").catch(() => undefined);
+        await page.waitForTimeout(60);
+        const filledByType = await locator.inputValue().catch(() => "");
+        if (hasMeaningfulInputValue(filledByType, minDigits)) {
+          return true;
+        }
+
+        await locator
+          .evaluate((node, value) => {
+            const element = node as {
+              value?: string;
+              dispatchEvent?: (event: { type?: string }) => boolean;
+              blur?: () => void;
+            };
+            const prototype = Object.getPrototypeOf(element) as {
+              value?: { set?: (this: { value?: string }, v: string) => void };
+            };
+            prototype.value?.set?.call(element, value);
+            element.dispatchEvent?.(new Event("input", { bubbles: true }));
+            element.dispatchEvent?.(new Event("change", { bubbles: true }));
+            element.blur?.();
+          }, next)
+          .catch(() => undefined);
+        await page.waitForTimeout(60);
+        const filledByEvaluate = await locator.inputValue().catch(() => "");
+        if (hasMeaningfulInputValue(filledByEvaluate, minDigits)) {
+          return true;
+        }
+      }
+    } catch {
+      // keep trying
+    }
+  }
+
+  return false;
+};
+
+const tryFillBirthdayByRawTyping = async (page: Page, selectors: string[], birthdate: string) => {
+  const [year, month, day] = birthdate.split("-");
+  const mmddyyyy = `${month}${day}${year}`;
+  const ddmmyyyy = `${day}${month}${year}`;
+
+  for (const selector of selectors) {
+    try {
+      const locator = await findFirstVisibleLocator(page, selector);
+      if (!locator) {
+        continue;
+      }
+
+      const placeholder =
+        (
+          (await locator.getAttribute("placeholder").catch(() => null)) ??
+          (await locator.getAttribute("aria-label").catch(() => null)) ??
+          ""
+        ).toUpperCase();
+      const raw = placeholder.includes("DD") &&
+        placeholder.includes("MM") &&
+        placeholder.indexOf("DD") < placeholder.indexOf("MM")
+        ? ddmmyyyy
+        : mmddyyyy;
+
+      await primeInputForTyping(page, locator).catch(() => undefined);
+      await locator.fill("").catch(() => undefined);
+      await page.keyboard.type(raw, { delay: 35 });
+      await locator.press("Tab").catch(() => undefined);
+      await page.waitForTimeout(90);
+
+      const typedValue = await locator.inputValue().catch(() => "");
+      if (hasMeaningfulInputValue(typedValue, 6)) {
+        return true;
+      }
+    } catch {
+      // keep trying
+    }
+  }
+
+  return false;
+};
+
+const activateAboutYouInputs = async (page: Page) => {
+  try {
+    const currentUrl = page.url().toLowerCase();
+    if (!currentUrl.includes("auth.openai.com/about-you")) {
+      return;
+    }
+
+    for (const selector of profileBirthdayFieldSelectors) {
+      const locator = await findFirstVisibleLocator(page, selector);
+      if (!locator) {
+        continue;
+      }
+      await primeInputForTyping(page, locator).catch(() => undefined);
+      await page.waitForTimeout(80);
+      break;
+    }
+  } catch {
+    // no-op
+  }
+};
+
+const selectOptionFirstVisible = async (
+  page: Page,
+  selectors: string[],
+  values: string[],
+) => {
+  for (const selector of selectors) {
+    try {
+      const locator = await findFirstVisibleLocator(page, selector);
+      if (!locator) {
+        continue;
+      }
+
+      for (const value of values) {
+        const normalized = value.trim();
+        if (!normalized) {
+          continue;
+        }
+        if (await locator.selectOption({ label: normalized }).then(() => true).catch(() => false)) {
+          return true;
+        }
+        if (await locator.selectOption(normalized).then(() => true).catch(() => false)) {
+          return true;
+        }
       }
     } catch {
       // keep trying
@@ -568,6 +879,16 @@ const clickThroughInterstitials = async (
   return false;
 };
 
+const trySwitchToEmailAuth = async (page: Page, onProgress: (message: string) => void) => {
+  if (!(await clickFirstVisible(page, continueWithEmailSelectors))) {
+    return false;
+  }
+
+  onProgress("检测到手机号登录入口，正在切换到邮箱登录/注册...");
+  await page.waitForTimeout(1_200);
+  return true;
+};
+
 const openRegistrationFromHomepage = async (
   page: Page,
   onProgress: (message: string) => void,
@@ -623,7 +944,14 @@ const openRegistrationFromHomepage = async (
       await page.waitForTimeout(1_200);
     }
 
+    if (await trySwitchToEmailAuth(page, onProgress)) {
+      continue;
+    }
+
     if (await isPhoneBlocked(page)) {
+      if ((await isAnyVisible(page, phoneEntrySelectors)) && (await trySwitchToEmailAuth(page, onProgress))) {
+        continue;
+      }
       throw new Error(phoneFailureMessage);
     }
 
@@ -734,7 +1062,10 @@ const fillOtpCode = async (page: Page, code: string) => {
     for (let index = 0; index < code.length; index += 1) {
       const selector = `input[data-index='${index}']`;
       if (await isVisible(page, selector)) {
-        await typeIntoLocator(page.locator(selector).first(), code[index] ?? "");
+        const locator = await findFirstVisibleLocator(page, selector);
+        if (locator) {
+          await typeIntoLocator(locator, code[index] ?? "");
+        }
       }
     }
     return true;
@@ -746,21 +1077,27 @@ const fillOtpCode = async (page: Page, code: string) => {
 const fillReactAriaBirthday = async (page: Page, birthdate: string) => {
   const [year, month, day] = birthdate.split("-");
   const segments = [
-    { selector: 'div[role="spinbutton"][data-type="year"], div[data-type="year"]', value: year },
     {
-      selector: 'div[role="spinbutton"][data-type="month"], div[data-type="month"]',
+      selector:
+        '[role="spinbutton"][data-type="year"], [data-type="year"], [role="spinbutton"][aria-label*="Year"], [role="spinbutton"][aria-label*="year"], [role="spinbutton"][aria-label*="年"]',
+      value: year,
+    },
+    {
+      selector:
+        '[role="spinbutton"][data-type="month"], [data-type="month"], [role="spinbutton"][aria-label*="Month"], [role="spinbutton"][aria-label*="month"], [role="spinbutton"][aria-label*="月"]',
       value: String(Number(month)),
     },
     {
-      selector: 'div[role="spinbutton"][data-type="day"], div[data-type="day"]',
+      selector:
+        '[role="spinbutton"][data-type="day"], [data-type="day"], [role="spinbutton"][aria-label*="Day"], [role="spinbutton"][aria-label*="day"], [role="spinbutton"][aria-label*="日"]',
       value: String(Number(day)),
     },
   ];
 
   let filled = false;
   for (const segment of segments) {
-    const locator = page.locator(segment.selector).first();
-    if ((await locator.count()) === 0 || !(await locator.isVisible())) {
+    const locator = await findFirstVisibleLocator(page, segment.selector);
+    if (!locator) {
       return filled;
     }
     await locator.click();
@@ -822,20 +1159,88 @@ const fillBirthdayFields = async (page: Page, birthdate: string) => {
     return true;
   }
 
-  const birthdayInputSelectors = [
-    "input[name='birthdate']",
-    "input[name='birthday']",
-    "input[id*='date']",
-    "input[placeholder*='YYYY']",
+  const segmentedBirthday = [
+    {
+      selectors: [
+        "input[autocomplete='bday-year']",
+        "input[name*='birth'][name*='year']",
+        "input[id*='birth'][id*='year']",
+        "input[placeholder*='YYYY']",
+        "input[aria-label*='Year']",
+        "input[aria-label*='year']",
+        "input[aria-label*='年']",
+      ],
+      value: year,
+    },
+    {
+      selectors: [
+        "input[autocomplete='bday-month']",
+        "input[name*='birth'][name*='month']",
+        "input[id*='birth'][id*='month']",
+        "input[placeholder*='MM']",
+        "input[aria-label*='Month']",
+        "input[aria-label*='month']",
+        "input[aria-label*='月']",
+      ],
+      value: String(Number(month)),
+    },
+    {
+      selectors: [
+        "input[autocomplete='bday-day']",
+        "input[name*='birth'][name*='day']",
+        "input[id*='birth'][id*='day']",
+        "input[placeholder*='DD']",
+        "input[aria-label*='Day']",
+        "input[aria-label*='day']",
+        "input[aria-label*='日']",
+      ],
+      value: String(Number(day)),
+    },
   ];
-  if (await fillFirstVisible(page, birthdayInputSelectors, `${month}/${day}/${year}`)) {
+  let segmentedFilled = 0;
+  for (const segment of segmentedBirthday) {
+    if (await fillFirstVisible(page, segment.selectors, segment.value)) {
+      segmentedFilled += 1;
+    }
+  }
+  if (segmentedFilled >= 2) {
     return true;
   }
 
-  return false;
+  const birthdayInputSelectors = profileBirthdayFieldSelectors;
+  if (await tryFillBirthdayByRawTyping(page, birthdayInputSelectors, birthdate)) {
+    await setHiddenBirthdayValue(page, birthdate).catch(() => undefined);
+    return true;
+  }
+
+  const normalizedMonth = String(Number(month));
+  const normalizedDay = String(Number(day));
+  const birthdayCandidates = [
+    `${month}${day}${year}`,
+    `${day}${month}${year}`,
+    `${year}-${month}-${day}`,
+    `${year}/${month}/${day}`,
+    `${year}/${normalizedMonth}/${normalizedDay}`,
+    `${month}/${day}/${year}`,
+    `${normalizedMonth}/${normalizedDay}/${year}`,
+    `${year}.${month}.${day}`,
+    `${year}年${normalizedMonth}月${normalizedDay}日`,
+  ];
+  if (
+    await tryFillInputWithCandidates(page, birthdayInputSelectors, birthdayCandidates, {
+      minDigits: 6,
+    })
+  ) {
+    await setHiddenBirthdayValue(page, birthdate).catch(() => undefined);
+    return true;
+  }
+
+  return setHiddenBirthdayValue(page, birthdate);
 };
 
 const fillProfile = async (page: Page, profile: { name: string; birthdate: string }) => {
+  await activateAboutYouInputs(page);
+
   if (await isAnyVisible(page, profileFirstNameSelectors)) {
     const [firstName = "Alex", lastName = "Bennett"] = profile.name.split(/\s+/, 2);
     await fillFirstVisible(page, profileFirstNameSelectors, firstName);
@@ -851,10 +1256,29 @@ const fillProfile = async (page: Page, profile: { name: string; birthdate: strin
       : 31;
 
   if (await isAnyVisible(page, profileAgeSelectors)) {
-    await fillFirstVisible(page, profileAgeSelectors, String(computedAge));
+    const ageCandidates = [
+      String(computedAge),
+      `${computedAge} `,
+      `${computedAge}岁`,
+      `${computedAge} years`,
+    ];
+    const filledAge = await tryFillInputWithCandidates(page, profileAgeSelectors, ageCandidates, {
+      minDigits: 2,
+    });
+    if (!filledAge) {
+      await fillFirstVisible(page, profileAgeSelectors, String(computedAge));
+    }
+  } else if (await isAnyVisible(page, profileAgeSelectSelectors)) {
+    await selectOptionFirstVisible(page, profileAgeSelectSelectors, [
+      String(computedAge),
+      `${computedAge}`,
+      `${computedAge} years`,
+      `${computedAge}岁`,
+    ]);
   } else {
     await fillBirthdayFields(page, profile.birthdate);
   }
+  await setHiddenBirthdayValue(page, profile.birthdate).catch(() => undefined);
 
   await page.waitForTimeout(250);
   await clickFirstVisible(page, primaryActionSelectors);
@@ -1546,7 +1970,17 @@ export class ChatgptRegistrationManager {
         assertSessionAlive();
         assertNotStalled();
 
+        if (await trySwitchToEmailAuth(page, reportProgress)) {
+          continue;
+        }
+
         if (await isPhoneBlocked(page)) {
+          if (
+            (await isAnyVisible(page, phoneEntrySelectors)) &&
+            (await trySwitchToEmailAuth(page, reportProgress))
+          ) {
+            continue;
+          }
           throw new Error(phoneFailureMessage);
         }
 

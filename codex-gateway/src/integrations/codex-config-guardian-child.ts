@@ -19,6 +19,7 @@ const readArg = (name: string) => {
 const parentPid = Number(readArg("--parent-pid"));
 const configPath = readArg("--config-path");
 const backupPath = readArg("--backup-path");
+const managedProviderId = "quota_gateway_auto_switch_managed";
 
 const isProcessAlive = (pid: number) => {
   if (!Number.isFinite(pid) || pid <= 0) {
@@ -61,7 +62,7 @@ const restoreOnce = () => {
 
   const current = readFileSync(configPath, "utf8");
   const stripped = stripManagedBlock(current).replace(
-    /^(\s*)model_provider\s*=\s*"quota_gateway_auto_switch_managed"\s*(?:#.*)?$/m,
+    new RegExp(`^(\\s*)model_provider\\s*=\\s*"${managedProviderId}"\\s*(?:#.*)?$`, "m"),
     "",
   );
   writeFileSync(configPath, stripped.endsWith("\n") ? stripped : `${stripped}\n`, "utf8");
@@ -83,4 +84,3 @@ const timer = setInterval(() => {
     process.exit(0);
   }
 }, 2_000);
-

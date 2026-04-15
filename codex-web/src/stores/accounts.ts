@@ -12,9 +12,13 @@ export const useAccountsStore = defineStore("accounts", () => {
 
   let refreshTimerId: number | null = null;
   let refreshTask: Promise<void> | null = null;
+  let refreshQueued = false;
 
-  const refreshAccounts = () => {
+  const refreshAccounts = (options?: { queueIfBusy?: boolean }) => {
     if (refreshTask) {
+      if (options?.queueIfBusy) {
+        refreshQueued = true;
+      }
       return refreshTask;
     }
 
@@ -31,6 +35,10 @@ export const useAccountsStore = defineStore("accounts", () => {
       }
     })().finally(() => {
       refreshTask = null;
+      if (refreshQueued) {
+        refreshQueued = false;
+        void refreshAccounts();
+      }
     });
 
     return refreshTask;
@@ -53,7 +61,7 @@ export const useAccountsStore = defineStore("accounts", () => {
     }
 
     refreshing.value = false;
-    await refreshAccounts();
+    await refreshAccounts({ queueIfBusy: true });
   };
 
   const startAutoRefresh = (intervalMs = 30_000) => {

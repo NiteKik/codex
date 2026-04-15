@@ -8,7 +8,7 @@ const accountsStore = useAccountsStore();
 const { accounts, errorMessage, refreshing } = storeToRefs(accountsStore);
 
 const refreshAccounts = async () => {
-  await accountsStore.refreshAccounts();
+  await accountsStore.refreshAccounts({ queueIfBusy: true });
 };
 
 onMounted(() => {

@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { Separator } from "reka-ui";
 import { useTokensPage } from "../composables/use-tokens-page.ts";
-import { formatDateTime, formatExpiry, formatTokenStatus } from "../stores/tokens.ts";
+import {
+  formatDateTime,
+  formatExpiry,
+  formatTokenStatus,
+} from "../stores/tokens.ts";
 
 const {
   required,
@@ -14,22 +18,22 @@ const {
   activeCount,
   revokedCount,
   expiredCount,
+  createDialogRef,
   createSubmitting,
   createName,
   createNeverExpires,
   createTtlHours,
   createFeedback,
   createFeedbackTone,
+  ttlDialogRef,
   ttlSubmitting,
   editingTokenName,
   ttlNeverExpires,
   ttlHours,
   ttlFeedback,
   ttlFeedbackTone,
-  revealedTokenValue,
-  createDialogRef,
-  ttlDialogRef,
   revealDialogRef,
+  revealedTokenValue,
   openCreateDialog,
   closeCreateDialog,
   closeRevealDialog,
@@ -46,46 +50,51 @@ const {
 </script>
 
 <template>
-  <div class="token-shell">
-    <section class="token-hero">
-      <div class="token-hero__copy">
-        <span class="token-kicker">Gateway Token</span>
+  <div class="tokens-page">
+    <section class="tokens-hero">
+      <div class="tokens-hero__copy">
+        <span class="tokens-kicker">Gateway Tokens</span>
         <h1>Token 管理</h1>
-        <p>在这里集中管理网关访问 Token：生成、销毁和时效控制。</p>
+        <p>统一管理网关访问凭证：生成、时效调整、销毁与安全复制。</p>
       </div>
 
-      <div class="token-stats-grid">
-        <article class="token-stat-card">
+      <div class="tokens-metrics" aria-label="Token 概览">
+        <article class="metric-card metric-card--state">
           <small>鉴权状态</small>
           <strong>{{ required ? "已启用" : "已关闭" }}</strong>
         </article>
-        <article class="token-stat-card">
+        <article class="metric-card metric-card--active">
           <small>生效中</small>
           <strong>{{ activeCount }}</strong>
         </article>
-        <article class="token-stat-card">
-          <small>已失效/销毁</small>
-          <strong>{{ expiredCount + revokedCount }}</strong>
+        <article class="metric-card metric-card--expired">
+          <small>已过期</small>
+          <strong>{{ expiredCount }}</strong>
+        </article>
+        <article class="metric-card metric-card--revoked">
+          <small>已销毁</small>
+          <strong>{{ revokedCount }}</strong>
         </article>
       </div>
     </section>
 
-    <div v-if="pageError" class="token-feedback token-feedback--error" role="alert">
+    <div
+      v-if="pageError"
+      class="tokens-feedback tokens-feedback--error"
+      role="alert"
+    >
       {{ pageError }}
     </div>
 
-    <section class="token-panel">
-      <div class="section-heading">
-        <div>
-          <span class="section-kicker">Primary Token</span>
-          <h2>默认 Token</h2>
-        </div>
+    <section class="tokens-panel">
+      <div class="tokens-panel__head tokens-panel__title-wrap">
+        <span class="tokens-kicker">Primary Token</span>
+        <h2>默认 Token</h2>
       </div>
-      <Separator class="tokens-separator" orientation="horizontal" />
+
       <template v-if="primaryToken">
-        <div class="token-primary-grid">
+        <div class="token-primary-card">
           <label class="token-field">
-            <span>Token</span>
             <div class="token-field__row">
               <input
                 class="token-input"
@@ -103,6 +112,7 @@ const {
               </button>
             </div>
           </label>
+
           <p class="token-hint">
             来源：{{ primaryToken.source || "unknown" }}
             <span v-if="primaryToken.tokenFilePath">
@@ -114,78 +124,107 @@ const {
       <p v-else class="token-hint">加载中...</p>
     </section>
 
-    <section class="token-panel">
-      <div class="section-heading">
-        <div>
-          <span class="section-kicker">Managed Tokens</span>
+    <section class="tokens-panel">
+      <div class="tokens-panel__head">
+        <div class="tokens-panel__title-wrap">
+          <span class="tokens-kicker">Managed Tokens</span>
           <h2>额外 Token</h2>
         </div>
-        <button type="button" class="primary-btn token-add-btn" @click="openCreateDialog">
+
+        <button type="button" class="primary-btn" @click="openCreateDialog">
           生成 Token
         </button>
       </div>
 
       <Separator class="tokens-separator" orientation="horizontal" />
 
-      <div v-if="pageFeedback" class="token-feedback" :class="`token-feedback--${pageFeedbackTone}`">
+      <div
+        v-if="pageFeedback"
+        class="tokens-feedback"
+        :class="`tokens-feedback--${pageFeedbackTone}`"
+      >
         {{ pageFeedback }}
       </div>
 
       <template v-if="tokens.length === 0">
-        <div class="token-empty-card">暂无额外 Token，可点击“生成 Token”。</div>
+        <div class="tokens-empty">暂无额外 Token，可点击“生成 Token”。</div>
       </template>
-      <template v-else>
-        <div class="token-row token-row--header">
-          <div>名称</div>
-          <div>状态</div>
-          <div>时效</div>
-          <div>创建时间</div>
-          <div>操作</div>
-        </div>
 
-        <div v-for="token in tokens" :key="token.id" class="token-row">
-          <div class="token-row__name">
-            <strong>{{ token.name }}</strong>
-            <small>{{ token.tokenPreview }}</small>
-            <small>最近使用：{{ formatDateTime(token.lastUsedAt) }}</small>
-          </div>
-          <div>
-            <span class="status-badge" :class="`status-badge--${token.status}`">
-              {{ formatTokenStatus(token.status) }}
-            </span>
-          </div>
-          <div class="token-row__meta">{{ formatExpiry(token) }}</div>
-          <div class="token-row__meta">{{ formatDateTime(token.createdAt) }}</div>
-          <div class="token-row__actions">
-            <button
-              type="button"
-              class="secondary-btn token-action-btn"
-              :disabled="busyTokenId === token.id || token.status === 'revoked'"
-              @click="openTtlDialog(token)"
-            >
-              调整时效
-            </button>
-            <button
-              type="button"
-              class="secondary-btn token-action-btn token-action-btn--danger"
-              :disabled="busyTokenId === token.id || token.status === 'revoked'"
-              @click="destroyToken(token)"
-            >
-              {{ busyTokenId === token.id ? "处理中..." : "销毁" }}
-            </button>
-          </div>
+      <template v-else>
+        <div class="tokens-list">
+          <article v-for="token in tokens" :key="token.id" class="token-card">
+            <header class="token-card__head">
+              <div class="token-card__identity">
+                <h3>{{ token.name }}</h3>
+                <p>{{ token.tokenPreview }}</p>
+              </div>
+              <span
+                class="status-badge"
+                :class="`status-badge--${token.status}`"
+              >
+                {{ formatTokenStatus(token.status) }}
+              </span>
+            </header>
+
+            <div class="token-card__meta-grid">
+              <article class="token-meta-item">
+                <small>时效</small>
+                <strong>{{ formatExpiry(token) }}</strong>
+              </article>
+              <article class="token-meta-item">
+                <small>创建时间</small>
+                <strong>{{ formatDateTime(token.createdAt) }}</strong>
+              </article>
+              <article class="token-meta-item">
+                <small>最近使用</small>
+                <strong>{{ formatDateTime(token.lastUsedAt) }}</strong>
+              </article>
+            </div>
+
+            <footer class="token-card__footer">
+              <button
+                type="button"
+                class="secondary-btn token-action-btn"
+                :disabled="
+                  busyTokenId === token.id || token.status === 'revoked'
+                "
+                @click="openTtlDialog(token)"
+              >
+                调整时效
+              </button>
+              <button
+                type="button"
+                class="secondary-btn token-action-btn token-action-btn--danger"
+                :disabled="
+                  busyTokenId === token.id || token.status === 'revoked'
+                "
+                @click="destroyToken(token)"
+              >
+                {{ busyTokenId === token.id ? "处理中..." : "销毁" }}
+              </button>
+            </footer>
+          </article>
         </div>
       </template>
     </section>
 
-    <dialog ref="createDialogRef" class="help-dialog token-dialog" @click="onCreateDialogClick">
+    <dialog
+      ref="createDialogRef"
+      class="token-dialog"
+      @click="onCreateDialogClick"
+    >
       <div class="dialog-body">
         <div class="dialog-header">
           <div>
             <p class="dialog-kicker">Managed Token</p>
             <h2>生成 Token</h2>
           </div>
-          <button type="button" class="dialog-close" aria-label="关闭" @click="closeCreateDialog">
+          <button
+            type="button"
+            class="dialog-close"
+            aria-label="关闭"
+            @click="closeCreateDialog"
+          >
             ×
           </button>
         </div>
@@ -193,7 +232,13 @@ const {
         <form class="token-form" @submit.prevent="submitCreate">
           <label class="token-form-field">
             <span>名称（可选）</span>
-            <input v-model="createName" class="token-input" type="text" spellcheck="false" />
+            <input
+              v-model="createName"
+              class="token-input"
+              type="text"
+              spellcheck="false"
+              placeholder="例如：CI 发布流水线"
+            />
           </label>
 
           <label class="token-checkbox-row">
@@ -214,17 +259,26 @@ const {
 
           <div
             v-if="createFeedback"
-            class="token-feedback"
-            :class="`token-feedback--${createFeedbackTone}`"
+            class="tokens-feedback"
+            :class="`tokens-feedback--${createFeedbackTone}`"
           >
             {{ createFeedback }}
           </div>
 
           <div class="token-form-footer">
-            <button type="button" class="secondary-btn" :disabled="createSubmitting" @click="closeCreateDialog">
+            <button
+              type="button"
+              class="secondary-btn"
+              :disabled="createSubmitting"
+              @click="closeCreateDialog"
+            >
               取消
             </button>
-            <button type="submit" class="primary-btn" :disabled="createSubmitting">
+            <button
+              type="submit"
+              class="primary-btn"
+              :disabled="createSubmitting"
+            >
               {{ createSubmitting ? "生成中..." : "生成" }}
             </button>
           </div>
@@ -232,14 +286,21 @@ const {
       </div>
     </dialog>
 
-    <dialog ref="ttlDialogRef" class="help-dialog token-dialog" @click="onTtlDialogClick">
+    <dialog ref="ttlDialogRef" class="token-dialog" @click="onTtlDialogClick">
       <div class="dialog-body">
         <div class="dialog-header">
           <div>
             <p class="dialog-kicker">Managed Token</p>
             <h2>调整时效</h2>
           </div>
-          <button type="button" class="dialog-close" aria-label="关闭" @click="closeTtlDialog">×</button>
+          <button
+            type="button"
+            class="dialog-close"
+            aria-label="关闭"
+            @click="closeTtlDialog"
+          >
+            ×
+          </button>
         </div>
 
         <form class="token-form" @submit.prevent="submitTtlUpdate">
@@ -252,15 +313,30 @@ const {
 
           <label v-if="!ttlNeverExpires" class="token-form-field">
             <span>新的有效时长（小时）</span>
-            <input v-model="ttlHours" class="token-input" type="number" min="1" step="1" />
+            <input
+              v-model="ttlHours"
+              class="token-input"
+              type="number"
+              min="1"
+              step="1"
+            />
           </label>
 
-          <div v-if="ttlFeedback" class="token-feedback" :class="`token-feedback--${ttlFeedbackTone}`">
+          <div
+            v-if="ttlFeedback"
+            class="tokens-feedback"
+            :class="`tokens-feedback--${ttlFeedbackTone}`"
+          >
             {{ ttlFeedback }}
           </div>
 
           <div class="token-form-footer">
-            <button type="button" class="secondary-btn" :disabled="ttlSubmitting" @click="closeTtlDialog">
+            <button
+              type="button"
+              class="secondary-btn"
+              :disabled="ttlSubmitting"
+              @click="closeTtlDialog"
+            >
               取消
             </button>
             <button type="submit" class="primary-btn" :disabled="ttlSubmitting">
@@ -271,14 +347,25 @@ const {
       </div>
     </dialog>
 
-    <dialog ref="revealDialogRef" class="help-dialog token-dialog" @click="onRevealDialogClick">
+    <dialog
+      ref="revealDialogRef"
+      class="token-dialog"
+      @click="onRevealDialogClick"
+    >
       <div class="dialog-body">
         <div class="dialog-header">
           <div>
             <p class="dialog-kicker">Managed Token</p>
             <h2>新 Token（仅展示一次）</h2>
           </div>
-          <button type="button" class="dialog-close" aria-label="关闭" @click="closeRevealDialog">×</button>
+          <button
+            type="button"
+            class="dialog-close"
+            aria-label="关闭"
+            @click="closeRevealDialog"
+          >
+            ×
+          </button>
         </div>
 
         <label class="token-form-field">
@@ -300,63 +387,82 @@ const {
             </button>
           </div>
         </label>
-
       </div>
     </dialog>
   </div>
 </template>
 
 <style scoped>
-.token-shell {
+.tokens-page {
+  --surface-bg: rgba(255, 253, 248, 0.82);
+  --surface-border: rgba(20, 33, 61, 0.1);
+
   max-width: 1220px;
   margin: 0 auto;
   display: grid;
   gap: 22px;
 }
 
-.token-hero,
-.token-panel {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid var(--line);
+.tokens-hero,
+.tokens-panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--surface-border);
   border-radius: 30px;
-  background: rgba(255, 253, 248, 0.82);
+  background: var(--surface-bg);
   box-shadow: var(--shadow);
   backdrop-filter: blur(16px);
+  gap: 8px;
+  animation: panel-enter 260ms ease both;
 }
 
-.token-hero {
+.tokens-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
   gap: 24px;
   padding: 28px;
 }
 
-.token-panel {
+.tokens-panel {
   padding: 24px;
 }
 
-.token-hero::before,
-.token-panel::before {
+.tokens-hero::before,
+.tokens-panel::before {
   content: "";
   position: absolute;
   inset: auto auto -72px -48px;
-  width: 180px;
-  height: 180px;
+  width: 184px;
+  height: 184px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(216, 109, 57, 0.12), transparent 70%);
+  background: radial-gradient(
+    circle,
+    rgba(216, 109, 57, 0.12),
+    transparent 70%
+  );
   pointer-events: none;
 }
 
-.token-hero__copy,
-.token-stats-grid,
-.token-panel {
+.tokens-hero::after,
+.tokens-panel::after {
+  content: "";
+  position: absolute;
+  inset: -80px -70px auto auto;
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(20, 33, 61, 0.1), transparent 72%);
+  pointer-events: none;
+}
+
+.tokens-hero__copy,
+.tokens-metrics,
+.tokens-panel__head {
   position: relative;
   z-index: 1;
 }
 
-.token-kicker,
-.section-kicker {
+.tokens-kicker {
   display: inline-flex;
   align-items: center;
   color: var(--accent-strong);
@@ -366,69 +472,89 @@ const {
   text-transform: uppercase;
 }
 
-.token-hero__copy h1 {
-  margin-top: 12px;
+.tokens-hero__copy h1 {
+  margin-top: 10px;
   font-family: var(--font-heading);
-  font-size: clamp(2.2rem, 4vw, 3.6rem);
+  font-size: clamp(2rem, 3.8vw, 3rem);
   line-height: 0.95;
 }
 
-.token-hero__copy p,
-.token-hint {
+.tokens-hero__copy p {
+  max-width: 42rem;
+  margin-top: 14px;
   color: var(--muted);
 }
 
-.token-hero__copy p {
-  margin-top: 16px;
-}
-
-.token-stats-grid {
+.tokens-metrics {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-content: start;
 }
 
-.token-stat-card {
-  padding: 14px 16px;
+.metric-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
   border: 1px solid rgba(20, 33, 61, 0.12);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.74);
-  display: grid;
-  gap: 4px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
 }
 
-.token-stat-card small {
+.metric-card small {
   color: var(--muted);
-  font-size: 0.84rem;
+  font-size: 0.8rem;
 }
 
-.token-stat-card strong {
+.metric-card strong {
   font-family: var(--font-heading);
-  font-size: 1.5rem;
+  font-size: 1.28rem;
 }
 
-.section-heading {
+.metric-card--active strong {
+  color: var(--success);
+}
+
+.metric-card--expired strong {
+  color: var(--warning);
+}
+
+.metric-card--revoked strong {
+  color: var(--critical);
+}
+
+.tokens-panel__head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 14px;
-  margin-bottom: 16px;
 }
 
-.section-heading h2 {
-  margin-top: 8px;
+.tokens-panel__title-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.tokens-panel__title-wrap h2 {
   font-family: var(--font-heading);
-  font-size: 1.7rem;
+  font-size: 1.66rem;
+  line-height: 1.05;
+}
+
+.tokens-panel__desc,
+.token-hint {
+  color: var(--muted);
 }
 
 .tokens-separator {
-  margin: 0 0 16px;
-  background: rgba(20, 33, 61, 0.1);
+  margin: 16px 0;
+  background: rgba(20, 33, 61, 0.12);
   height: 1px;
 }
 
-.token-primary-grid {
+.token-primary-card {
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .token-field {
@@ -436,76 +562,91 @@ const {
   gap: 8px;
 }
 
+.token-field__label {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
 .token-field__row {
   display: flex;
-  align-items: center;
   gap: 10px;
 }
 
-.token-input {
-  width: 100%;
-  min-height: 46px;
+.tokens-list {
+  display: grid;
+  gap: 12px;
+}
+
+.token-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(20, 33, 61, 0.08);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.72);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.token-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(216, 109, 57, 0.24);
+  box-shadow: 0 12px 28px rgba(17, 33, 59, 0.08);
+}
+
+.token-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.token-card__identity {
+  display: grid;
+  gap: 3px;
+}
+
+.token-card__identity h3 {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  line-height: 1.1;
+}
+
+.token-card__identity p {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.token-card__meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.token-meta-item {
+  display: grid;
+  gap: 3px;
   padding: 10px 12px;
-  border: 1px solid rgba(20, 33, 61, 0.12);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(20, 33, 61, 0.08);
+}
+
+.token-meta-item small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.token-meta-item strong {
+  font-size: 0.9rem;
+  font-weight: 700;
   color: var(--ink);
 }
 
-.token-input:focus {
-  outline: none;
-  border-color: rgba(216, 109, 57, 0.34);
-  box-shadow: 0 0 0 4px rgba(216, 109, 57, 0.08);
-}
-
-.token-row {
-  display: grid;
-  grid-template-columns:
-    minmax(180px, 1.15fr)
-    minmax(100px, 0.65fr)
-    minmax(150px, 0.9fr)
-    minmax(170px, 1fr)
-    minmax(180px, auto);
-  gap: 12px;
-  align-items: center;
-  padding: 14px 16px;
-  border: 1px solid rgba(20, 33, 61, 0.08);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.74);
-}
-
-.token-row + .token-row {
-  margin-top: 10px;
-}
-
-.token-row--header {
-  color: var(--muted);
-  font-size: 0.84rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.token-row--header + .token-row {
-  margin-top: 10px;
-}
-
-.token-row__name {
-  display: grid;
-  gap: 4px;
-}
-
-.token-row__name strong {
-  font-family: var(--font-heading);
-}
-
-.token-row__name small,
-.token-row__meta {
-  color: var(--muted);
-  font-size: 0.84rem;
-}
-
-.token-row__actions {
+.token-card__footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -513,12 +654,14 @@ const {
 
 .status-badge {
   display: inline-flex;
+  align-items: center;
   width: fit-content;
-  padding: 4px 10px;
+  padding: 6px 10px;
   border-radius: 999px;
   font-size: 0.78rem;
   font-weight: 800;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .status-badge--active {
@@ -536,16 +679,24 @@ const {
   color: #aa3d37;
 }
 
-.token-empty-card {
-  padding: 22px;
-  border: 1px dashed rgba(20, 33, 61, 0.16);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.56);
-  color: var(--muted);
+.token-input {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid rgba(20, 33, 61, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+}
+
+.token-input:focus {
+  outline: none;
+  border-color: rgba(216, 109, 57, 0.34);
+  box-shadow: 0 0 0 4px rgba(216, 109, 57, 0.09);
 }
 
 .primary-btn {
-  padding: 14px 18px;
+  padding: 13px 18px;
   border: 0;
   border-radius: 16px;
   background: linear-gradient(135deg, #d86d39 0%, #b94d1d 100%);
@@ -554,6 +705,15 @@ const {
   font-weight: 800;
   cursor: pointer;
   box-shadow: 0 14px 28px rgba(185, 77, 29, 0.28);
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    opacity 180ms ease;
+}
+
+.primary-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 20px 38px rgba(185, 77, 29, 0.3);
 }
 
 .primary-btn:disabled {
@@ -563,13 +723,19 @@ const {
 }
 
 .secondary-btn {
-  padding: 12px 16px;
+  padding: 4px 8px;
   border: 1px solid rgba(20, 33, 61, 0.12);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.8);
   color: var(--ink);
   font-weight: 700;
   cursor: pointer;
+}
+
+.secondary-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(216, 109, 57, 0.22);
+  background: rgba(255, 247, 241, 0.95);
 }
 
 .secondary-btn:disabled {
@@ -587,28 +753,32 @@ const {
   color: var(--critical);
 }
 
-.token-add-btn {
-  min-width: 120px;
-}
-
-.token-feedback {
+.tokens-feedback {
   padding: 12px 14px;
   border-radius: 16px;
   font-size: 0.94rem;
   font-weight: 700;
 }
 
-.token-feedback--success {
+.tokens-feedback--success {
   background: var(--success-soft);
   color: var(--success);
 }
 
-.token-feedback--error {
+.tokens-feedback--error {
   background: var(--critical-soft);
   color: var(--critical);
 }
 
-.help-dialog {
+.tokens-empty {
+  padding: 24px;
+  border: 1px dashed rgba(20, 33, 61, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--muted);
+}
+
+.token-dialog {
   width: min(92vw, 620px);
   padding: 0;
   border: 1px solid rgba(20, 33, 61, 0.08);
@@ -617,7 +787,7 @@ const {
   box-shadow: 0 30px 80px rgba(10, 23, 48, 0.2);
 }
 
-.help-dialog::backdrop {
+.token-dialog::backdrop {
   background: rgba(10, 23, 48, 0.4);
   backdrop-filter: blur(6px);
 }
@@ -652,8 +822,8 @@ const {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 0;
   border-radius: 50%;
@@ -686,36 +856,60 @@ const {
   gap: 10px;
 }
 
-@media (max-width: 980px) {
-  .token-hero {
+@keyframes panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1080px) {
+  .tokens-hero {
     grid-template-columns: 1fr;
     padding: 20px;
   }
 
-  .section-heading {
+  .tokens-panel {
+    padding: 20px;
+  }
+
+  .tokens-panel__head {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .token-add-btn {
+  .tokens-panel__head .primary-btn {
     width: 100%;
   }
 
-  .token-row {
+  .token-card__meta-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .tokens-page {
+    gap: 16px;
+  }
+
+  .tokens-metrics {
     grid-template-columns: 1fr;
   }
 
-  .token-row__actions {
-    justify-content: flex-start;
-  }
-
   .token-field__row,
+  .token-card__footer,
   .token-form-footer {
     flex-direction: column;
     align-items: stretch;
   }
 
   .token-field__row .secondary-btn,
+  .token-card__footer .secondary-btn,
   .token-form-footer .secondary-btn,
   .token-form-footer .primary-btn {
     width: 100%;

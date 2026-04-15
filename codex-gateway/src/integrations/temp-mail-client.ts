@@ -212,39 +212,60 @@ export class TempMailClient {
     for (const [key, value] of Object.entries(options?.searchParams ?? {})) {
       url.searchParams.set(key, value);
     }
+    const requestLabel = `${method} ${url.origin}${url.pathname}`;
+    const attempts = 2;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.requestTimeoutMs ?? 20_000);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.options.requestTimeoutMs ?? 20_000);
 
-    try {
-      const response = await fetch(url, {
-        method,
-        headers: {
-          accept: "application/json",
-          "content-type": "application/json",
-          "x-admin-auth": this.options.adminPassword.trim(),
-          ...(this.options.sitePassword?.trim()
-            ? { "x-custom-auth": this.options.sitePassword.trim() }
-            : {}),
-        },
-        body: options?.json ? JSON.stringify(options.json) : undefined,
-        signal: controller.signal,
-      });
+      try {
+        const response = await fetch(url, {
+          method,
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            "x-admin-auth": this.options.adminPassword.trim(),
+            ...(this.options.sitePassword?.trim()
+              ? { "x-custom-auth": this.options.sitePassword.trim() }
+              : {}),
+          },
+          body: options?.json ? JSON.stringify(options.json) : undefined,
+          signal: controller.signal,
+        });
 
-      const payload = await parseJsonResponse(response);
-      if (!response.ok) {
-        const message =
-          typeof payload === "string"
-            ? payload
-            : isRecord(payload) && typeof payload.error === "string"
-              ? payload.error
-              : `HTTP ${response.status}`;
-        throw new Error(`Temp Mail 请求失败：${message}`);
+        const payload = await parseJsonResponse(response);
+        if (!response.ok) {
+          const message =
+            typeof payload === "string"
+              ? payload
+              : isRecord(payload) && typeof payload.error === "string"
+                ? payload.error
+                : `HTTP ${response.status}`;
+          throw new Error(`Temp Mail 请求失败：${message}`);
+        }
+
+        return payload;
+      } catch (error) {
+        const isTimeout = controller.signal.aborted;
+        if (attempt < attempts) {
+          await sleep(400 * attempt);
+          continue;
+        }
+
+        if (isTimeout) {
+          throw new Error(
+            `Temp Mail 请求超时（${requestLabel}，>${this.options.requestTimeoutMs ?? 20_000}ms）。`,
+          );
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Temp Mail 网络请求失败（${requestLabel}）：${message}`);
+      } finally {
+        clearTimeout(timeout);
       }
-
-      return payload;
-    } finally {
-      clearTimeout(timeout);
     }
+
+    throw new Error(`Temp Mail 网络请求失败（${requestLabel}）：未知错误。`);
   }
 }

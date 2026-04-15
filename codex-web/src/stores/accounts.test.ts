@@ -89,6 +89,42 @@ describe("useAccountsStore", () => {
     expect(store.refreshing).toBe(false);
   });
 
+  test("queues one more refresh when queueIfBusy is enabled", async () => {
+    let firstResolve: ((accounts: AccountRow[]) => void) | undefined;
+    let secondResolve: ((accounts: AccountRow[]) => void) | undefined;
+
+    fetchAccountsMock
+      .mockReturnValueOnce(
+        new Promise<AccountRow[]>((resolve) => {
+          firstResolve = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise<AccountRow[]>((resolve) => {
+          secondResolve = resolve;
+        }),
+      );
+
+    const store = useAccountsStore();
+    const first = store.refreshAccounts();
+    const second = store.refreshAccounts({ queueIfBusy: true });
+
+    expect(fetchAccountsMock).toHaveBeenCalledTimes(1);
+
+    firstResolve?.([createAccount("acc-first")]);
+    await Promise.all([first, second]);
+
+    expect(fetchAccountsMock).toHaveBeenCalledTimes(2);
+    expect(store.refreshing).toBe(true);
+
+    secondResolve?.([createAccount("acc-second")]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.refreshing).toBe(false);
+    expect(store.accounts).toHaveLength(1);
+    expect(store.accounts[0]?.id).toBe("acc-second");
+  });
+
   test("stores api error message when refresh fails", async () => {
     fetchAccountsMock.mockRejectedValue(new Error("账号池接口失败"));
     const store = useAccountsStore();

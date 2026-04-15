@@ -7,6 +7,7 @@ import {
 } from "../services/settings-page-api.ts";
 
 export const useAccountAutomationSettings = () => {
+  const pollIntervalMinSecondsWhenEnabled = 5;
   const appConfigStore = useAppConfigStore();
   const { gatewayBaseUrl } = storeToRefs(appConfigStore);
   const activeBaseUrl = computed(() => gatewayBaseUrl.value);
@@ -16,12 +17,26 @@ export const useAccountAutomationSettings = () => {
   const pollIntervalError = ref("");
   const pollIntervalFeedback = ref("");
   const pollIntervalInput = ref("30");
-  const pollIntervalMinSeconds = ref(5);
+  const pollIntervalStableSeconds = ref(30);
+  const pollIntervalLastNonZeroSeconds = ref(30);
+  const pendingPollIntervalSave = ref(false);
+  const pollingEnabled = ref(true);
+  const pollingToggleSaving = ref(false);
+  const controlError = ref("");
+  const controlFeedback = ref("");
+  const pollIntervalMinSeconds = ref(0);
   const pollIntervalMaxSeconds = ref(3600);
 
-  const automationSaving = ref(false);
-  const automationError = ref("");
-  const automationFeedback = ref("");
+  const ruleSaving = ref(false);
+  const pendingRuleSave = ref(false);
+  const ruleError = ref("");
+  const ruleFeedback = ref("");
+  const registrationSaving = ref(false);
+  const registrationError = ref("");
+  const registrationFeedback = ref("");
+  const pendingRegistrationSave = ref(false);
+  const autoRegisterToggleSaving = ref(false);
+  const freeSchedulingToggleSaving = ref(false);
   const tempMailBaseUrlInput = ref("");
   const tempMailAdminPasswordInput = ref("");
   const tempMailSitePasswordInput = ref("");
@@ -46,6 +61,11 @@ export const useAccountAutomationSettings = () => {
   const applySettingsPayload = async () => {
     const payload = await fetchGatewaySettings(activeBaseUrl.value);
     pollIntervalInput.value = String(payload.pollIntervalSeconds);
+    pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+    if (payload.pollIntervalSeconds > 0) {
+      pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+    }
+    pollingEnabled.value = Boolean(payload.pollingEnabled);
     pollIntervalMinSeconds.value = payload.pollIntervalRange.minSeconds;
     pollIntervalMaxSeconds.value = payload.pollIntervalRange.maxSeconds;
     tempMailBaseUrlInput.value = payload.tempMailBaseUrl ?? "";
@@ -77,14 +97,17 @@ export const useAccountAutomationSettings = () => {
 
     pollIntervalLoading.value = true;
     pollIntervalError.value = "";
-    automationError.value = "";
+    ruleError.value = "";
+    registrationError.value = "";
+    controlError.value = "";
 
     try {
       await applySettingsPayload();
     } catch (error) {
       const message = error instanceof Error ? error.message : "设置读取失败。";
       pollIntervalError.value = message;
-      automationError.value = message;
+      ruleError.value = message;
+      registrationError.value = message;
     } finally {
       pollIntervalLoading.value = false;
     }
@@ -98,6 +121,7 @@ export const useAccountAutomationSettings = () => {
 
   const savePollIntervalSetting = async () => {
     if (pollIntervalSaving.value) {
+      pendingPollIntervalSave.value = true;
       return;
     }
 
@@ -110,23 +134,85 @@ export const useAccountAutomationSettings = () => {
       return;
     }
 
-    if (parsed < pollIntervalMinSeconds.value || parsed > pollIntervalMaxSeconds.value) {
-      pollIntervalError.value = `采集频率需在 ${pollIntervalMinSeconds.value}-${pollIntervalMaxSeconds.value} 秒之间。`;
+    if (
+      parsed !== 0 &&
+      (parsed < pollIntervalMinSecondsWhenEnabled || parsed > pollIntervalMaxSeconds.value)
+    ) {
+      pollIntervalError.value = `采集频率需为 0（关闭）或 ${pollIntervalMinSecondsWhenEnabled}-${pollIntervalMaxSeconds.value} 秒。`;
       return;
     }
 
     pollIntervalSaving.value = true;
 
     try {
+      const nextPollingEnabled = parsed > 0;
       const payload = await updateGatewaySettings(activeBaseUrl.value, {
         pollIntervalSeconds: parsed,
+        pollingEnabled: nextPollingEnabled,
       });
       pollIntervalInput.value = String(payload.pollIntervalSeconds);
-      pollIntervalFeedback.value = `已保存，当前采集频率 ${payload.pollIntervalSeconds} 秒。`;
+      pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+      if (payload.pollIntervalSeconds > 0) {
+        pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+      }
+      pollingEnabled.value = Boolean(payload.pollingEnabled);
+      pollIntervalFeedback.value = payload.pollingEnabled
+        ? `已保存，当前采集频率 ${payload.pollIntervalSeconds} 秒。`
+        : "已关闭额度采集。";
     } catch (error) {
+      pollIntervalFeedback.value = "";
       pollIntervalError.value = error instanceof Error ? error.message : "采集频率保存失败。";
     } finally {
       pollIntervalSaving.value = false;
+      if (pendingPollIntervalSave.value) {
+        pendingPollIntervalSave.value = false;
+        void savePollIntervalSetting();
+      }
+    }
+  };
+
+  const savePollingEnabledToggle = async (nextValue?: boolean) => {
+    if (pollingToggleSaving.value) {
+      return;
+    }
+
+    const previousEnabled = pollingEnabled.value;
+    const nextEnabled = typeof nextValue === "boolean" ? nextValue : !previousEnabled;
+    pollingEnabled.value = nextEnabled;
+    pollingToggleSaving.value = true;
+    controlError.value = "";
+    controlFeedback.value = "";
+
+    const parsedInput = Number(pollIntervalInput.value);
+    const hasPositiveInput =
+      Number.isFinite(parsedInput) &&
+      Number.isInteger(parsedInput) &&
+      parsedInput >= pollIntervalMinSecondsWhenEnabled;
+    const fallbackInterval = Math.max(
+      pollIntervalMinSecondsWhenEnabled,
+      pollIntervalLastNonZeroSeconds.value || 30,
+    );
+    const nextIntervalSeconds = nextEnabled ? (hasPositiveInput ? parsedInput : fallbackInterval) : 0;
+
+    try {
+      const payload = await updateGatewaySettings(activeBaseUrl.value, {
+        pollIntervalSeconds: nextIntervalSeconds,
+        pollingEnabled: nextEnabled,
+      });
+      pollIntervalInput.value = String(payload.pollIntervalSeconds);
+      pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+      if (payload.pollIntervalSeconds > 0) {
+        pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+      }
+      pollingEnabled.value = Boolean(payload.pollingEnabled);
+      controlFeedback.value = payload.pollingEnabled
+        ? `已开启额度采集（${payload.pollIntervalSeconds} 秒）。`
+        : "已关闭额度采集。";
+    } catch (error) {
+      pollingEnabled.value = previousEnabled;
+      controlError.value = error instanceof Error ? error.message : "采集开关保存失败。";
+    } finally {
+      pollingToggleSaving.value = false;
     }
   };
 
@@ -148,22 +234,17 @@ export const useAccountAutomationSettings = () => {
     return parsed;
   };
 
-  const saveAutomationSettings = async () => {
-    if (automationSaving.value) {
+  const saveRuleSettings = async () => {
+    if (ruleSaving.value) {
+      pendingRuleSave.value = true;
       return;
     }
 
-    automationSaving.value = true;
-    automationError.value = "";
-    automationFeedback.value = "";
+    ruleSaving.value = true;
+    ruleError.value = "";
+    ruleFeedback.value = "";
 
     try {
-      const pollIntervalSeconds = parseBoundedInt(
-        pollIntervalInput.value,
-        "采集频率",
-        pollIntervalMinSeconds.value,
-        pollIntervalMaxSeconds.value,
-      );
       const autoRegisterThreshold = parseBoundedInt(
         autoRegisterThresholdInput.value,
         "补号阈值",
@@ -182,6 +263,45 @@ export const useAccountAutomationSettings = () => {
         autoRegisterCheckIntervalMin.value,
         autoRegisterCheckIntervalMax.value,
       );
+
+      const payload = await updateGatewaySettings(activeBaseUrl.value, {
+        autoRegisterThreshold,
+        autoRegisterBatchSize,
+        autoRegisterCheckIntervalSeconds,
+      });
+
+      pollIntervalInput.value = String(payload.pollIntervalSeconds);
+      pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+      if (payload.pollIntervalSeconds > 0) {
+        pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+      }
+      pollingEnabled.value = Boolean(payload.pollingEnabled);
+      autoRegisterThresholdInput.value = String(payload.autoRegisterThreshold);
+      autoRegisterBatchSizeInput.value = String(payload.autoRegisterBatchSize);
+      autoRegisterCheckIntervalInput.value = String(payload.autoRegisterCheckIntervalSeconds);
+      ruleFeedback.value = "补号规则已保存。";
+    } catch (error) {
+      ruleError.value = error instanceof Error ? error.message : "补号规则保存失败。";
+    } finally {
+      ruleSaving.value = false;
+      if (pendingRuleSave.value) {
+        pendingRuleSave.value = false;
+        void saveRuleSettings();
+      }
+    }
+  };
+
+  const saveRegistrationSettings = async () => {
+    if (registrationSaving.value) {
+      pendingRegistrationSave.value = true;
+      return;
+    }
+
+    registrationSaving.value = true;
+    registrationError.value = "";
+    registrationFeedback.value = "";
+
+    try {
       const autoRegisterTimeoutSeconds = parseBoundedInt(
         autoRegisterTimeoutInput.value,
         "注册超时",
@@ -190,40 +310,102 @@ export const useAccountAutomationSettings = () => {
       );
 
       const payload = await updateGatewaySettings(activeBaseUrl.value, {
-        pollIntervalSeconds,
         tempMailBaseUrl: tempMailBaseUrlInput.value.trim(),
         tempMailAdminPassword: tempMailAdminPasswordInput.value.trim(),
         tempMailSitePassword: tempMailSitePasswordInput.value.trim(),
         tempMailDefaultDomain: tempMailDefaultDomainInput.value.trim(),
         managedBrowserExecutablePath: managedBrowserExecutablePathInput.value.trim(),
-        autoRegisterEnabled: autoRegisterEnabled.value,
-        enableFreeAccountScheduling: enableFreeAccountScheduling.value,
-        autoRegisterThreshold,
-        autoRegisterBatchSize,
-        autoRegisterCheckIntervalSeconds,
-        autoRegisterTimeoutSeconds,
         autoRegisterHeadless: autoRegisterHeadless.value,
+        autoRegisterTimeoutSeconds,
       });
 
       pollIntervalInput.value = String(payload.pollIntervalSeconds);
+      pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+      if (payload.pollIntervalSeconds > 0) {
+        pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+      }
+      pollingEnabled.value = Boolean(payload.pollingEnabled);
       tempMailBaseUrlInput.value = payload.tempMailBaseUrl ?? "";
       tempMailAdminPasswordInput.value = payload.tempMailAdminPassword ?? "";
       tempMailSitePasswordInput.value = payload.tempMailSitePassword ?? "";
       tempMailDefaultDomainInput.value = payload.tempMailDefaultDomain ?? "";
       managedBrowserExecutablePathInput.value = payload.managedBrowserExecutablePath ?? "";
-      autoRegisterEnabled.value = Boolean(payload.autoRegisterEnabled);
-      enableFreeAccountScheduling.value = Boolean(payload.enableFreeAccountScheduling);
       autoRegisterHeadless.value = Boolean(payload.autoRegisterHeadless);
-      autoRegisterThresholdInput.value = String(payload.autoRegisterThreshold);
-      autoRegisterBatchSizeInput.value = String(payload.autoRegisterBatchSize);
-      autoRegisterCheckIntervalInput.value = String(payload.autoRegisterCheckIntervalSeconds);
       autoRegisterTimeoutInput.value = String(payload.autoRegisterTimeoutSeconds);
-      automationFeedback.value = "自动注册与补号配置已保存。";
-      pollIntervalFeedback.value = `已保存，当前采集频率 ${payload.pollIntervalSeconds} 秒。`;
+      registrationFeedback.value = "注册配置已自动保存。";
     } catch (error) {
-      automationError.value = error instanceof Error ? error.message : "自动注册配置保存失败。";
+      registrationFeedback.value = "";
+      registrationError.value = error instanceof Error ? error.message : "注册配置保存失败。";
     } finally {
-      automationSaving.value = false;
+      registrationSaving.value = false;
+      if (pendingRegistrationSave.value) {
+        pendingRegistrationSave.value = false;
+        void saveRegistrationSettings();
+      }
+    }
+  };
+
+  const saveAutoRegisterEnabledToggle = async (nextValue?: boolean) => {
+    if (autoRegisterToggleSaving.value || ruleSaving.value) {
+      return;
+    }
+
+    const previousValue = autoRegisterEnabled.value;
+    const targetValue = typeof nextValue === "boolean" ? nextValue : !previousValue;
+    autoRegisterEnabled.value = targetValue;
+    autoRegisterToggleSaving.value = true;
+    ruleError.value = "";
+    ruleFeedback.value = "";
+
+    try {
+      const payload = await updateGatewaySettings(activeBaseUrl.value, {
+        autoRegisterEnabled: targetValue,
+      });
+      pollIntervalInput.value = String(payload.pollIntervalSeconds);
+      pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+      if (payload.pollIntervalSeconds > 0) {
+        pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+      }
+      pollingEnabled.value = Boolean(payload.pollingEnabled);
+      autoRegisterEnabled.value = Boolean(payload.autoRegisterEnabled);
+      ruleFeedback.value = `已${payload.autoRegisterEnabled ? "启用" : "关闭"}自动补号。`;
+    } catch (error) {
+      autoRegisterEnabled.value = previousValue;
+      ruleError.value = error instanceof Error ? error.message : "自动补号开关保存失败。";
+    } finally {
+      autoRegisterToggleSaving.value = false;
+    }
+  };
+
+  const saveFreeSchedulingToggle = async (nextValue?: boolean) => {
+    if (freeSchedulingToggleSaving.value) {
+      return;
+    }
+
+    const previousValue = enableFreeAccountScheduling.value;
+    const targetValue = typeof nextValue === "boolean" ? nextValue : !previousValue;
+    enableFreeAccountScheduling.value = targetValue;
+    freeSchedulingToggleSaving.value = true;
+    controlError.value = "";
+    controlFeedback.value = "";
+
+    try {
+      const payload = await updateGatewaySettings(activeBaseUrl.value, {
+        enableFreeAccountScheduling: targetValue,
+      });
+      pollIntervalInput.value = String(payload.pollIntervalSeconds);
+      pollIntervalStableSeconds.value = payload.pollIntervalSeconds;
+      enableFreeAccountScheduling.value = Boolean(payload.enableFreeAccountScheduling);
+      if (payload.pollIntervalSeconds > 0) {
+        pollIntervalLastNonZeroSeconds.value = payload.pollIntervalSeconds;
+      }
+      pollingEnabled.value = Boolean(payload.pollingEnabled);
+      controlFeedback.value = `已${payload.enableFreeAccountScheduling ? "启用" : "关闭"}免费账号调度。`;
+    } catch (error) {
+      enableFreeAccountScheduling.value = previousValue;
+      controlError.value = error instanceof Error ? error.message : "免费调度开关保存失败。";
+    } finally {
+      freeSchedulingToggleSaving.value = false;
     }
   };
 
@@ -248,13 +430,12 @@ export const useAccountAutomationSettings = () => {
     autoRegisterThresholdInput,
     autoRegisterThresholdMax,
     autoRegisterThresholdMin,
+    autoRegisterToggleSaving,
     autoRegisterTimeoutInput,
     autoRegisterTimeoutMax,
     autoRegisterTimeoutMin,
-    automationError,
-    automationFeedback,
-    automationSaving,
     enableFreeAccountScheduling,
+    freeSchedulingToggleSaving,
     loadAutomationSettings,
     managedBrowserExecutablePathInput,
     pollIntervalError,
@@ -264,7 +445,21 @@ export const useAccountAutomationSettings = () => {
     pollIntervalMaxSeconds,
     pollIntervalMinSeconds,
     pollIntervalSaving,
-    saveAutomationSettings,
+    pollingEnabled,
+    pollingToggleSaving,
+    controlError,
+    controlFeedback,
+    registrationError,
+    registrationFeedback,
+    registrationSaving,
+    ruleError,
+    ruleFeedback,
+    ruleSaving,
+    saveAutoRegisterEnabledToggle,
+    saveFreeSchedulingToggle,
+    savePollingEnabledToggle,
+    saveRegistrationSettings,
+    saveRuleSettings,
     savePollIntervalSetting,
     tempMailAdminPasswordInput,
     tempMailBaseUrlInput,

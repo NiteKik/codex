@@ -44,11 +44,16 @@ const inferWorkspaceKindFromPlanType = (planType: string | null): WorkspaceConte
 };
 
 const usageRollbackTolerance = 1;
+const normalizePlanType = (value: string | null | undefined) =>
+  value?.trim().toLowerCase() ?? "";
+
+const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
 
 export class AccountManager {
   constructor(
     private readonly db: GatewayDatabase,
     private readonly cooldownMs: number,
+    private readonly free401FreezeMs = 60 * 60_000,
   ) {}
 
   listAccounts() {
@@ -199,6 +204,31 @@ export class AccountManager {
     };
 
     if (error.httpStatus === 401) {
+      if (isFreePlanType(current.subscription.planType)) {
+        const freezeUntil = addMs(new Date(), this.free401FreezeMs);
+        this.db.updateAccountState(accountId, {
+          ...next,
+          status: "cooling",
+          cooldownUntil: freezeUntil,
+          consecutive429: 0,
+        });
+        this.db.logRuntime({
+          level: "warn",
+          scope: "account",
+          event: "account.free_401_frozen",
+          message: "免费账号触发 401，已冻结 1 小时并暂停调度",
+          accountId,
+          detailsJson: JSON.stringify({
+            planType: current.subscription.planType,
+            freezeMs: this.free401FreezeMs,
+            freezeUntil,
+            errorCode: error.code,
+          }),
+          createdAt: nowIso(),
+        });
+        return;
+      }
+
       this.db.updateAccountState(accountId, {
         ...next,
         status: "invalid",
@@ -305,6 +335,26 @@ export class AccountManager {
         }),
         createdAt: nowIso(),
       });
+    }
+
+    const shouldKeepFree401Freeze =
+      current.status === "cooling" &&
+      isFreePlanType(current.subscription.planType) &&
+      current.lastErrorCode === "upstream_401" &&
+      current.cooldownUntil !== null &&
+      !isExpired(current.cooldownUntil);
+
+    if (shouldKeepFree401Freeze) {
+      this.db.updateAccountState(snapshot.accountId, {
+        status: "cooling",
+        cooldownUntil: current.cooldownUntil,
+        consecutiveFailures: current.consecutiveFailures,
+        consecutive429: current.consecutive429,
+        lastErrorCode: current.lastErrorCode,
+        lastErrorMessage: current.lastErrorMessage,
+        updatedAt: nowIso(),
+      });
+      return;
     }
 
     this.db.updateAccountState(snapshot.accountId, {

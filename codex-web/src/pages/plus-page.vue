@@ -27,6 +27,7 @@ onUnmounted(() => {
 .plus-page-root .page-shell {
   max-width: 1220px;
   margin: 0 auto;
+  height: 100vh;
 }
 
 .plus-page-root .plan-content {
@@ -50,7 +51,11 @@ onUnmounted(() => {
   width: 320px;
   height: 320px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(216, 109, 57, 0.17), transparent 68%);
+  background: radial-gradient(
+    circle,
+    rgba(216, 109, 57, 0.17),
+    transparent 68%
+  );
   pointer-events: none;
 }
 
@@ -162,7 +167,11 @@ onUnmounted(() => {
   border: 1px solid rgba(20, 33, 61, 0.08);
   border-radius: 28px;
   background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.84), rgba(255, 251, 245, 0.96)),
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.84),
+      rgba(255, 251, 245, 0.96)
+    ),
     var(--panel-solid);
   box-shadow: 0 20px 60px rgba(20, 33, 61, 0.08);
 }
@@ -318,7 +327,11 @@ onUnmounted(() => {
   padding: 30px;
   border-radius: 28px;
   background:
-    radial-gradient(circle at top right, rgba(247, 197, 107, 0.18), transparent 30%),
+    radial-gradient(
+      circle at top right,
+      rgba(247, 197, 107, 0.18),
+      transparent 30%
+    ),
     linear-gradient(180deg, var(--card) 0%, var(--card-strong) 100%);
   color: var(--card-text);
   overflow: hidden;

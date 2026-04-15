@@ -24,6 +24,7 @@ export type GatewaySettingsPayload = {
   ok: boolean;
   pollIntervalMs: number;
   pollIntervalSeconds: number;
+  pollingEnabled: boolean;
   pollIntervalRange: {
     minSeconds: number;
     maxSeconds: number;
@@ -64,8 +65,8 @@ export type CodexAutoConfigStatusPayload = {
   ok: boolean;
   enabled: boolean;
   active: boolean;
-  mode: "provider_auth" | "provider_env" | "openai_base_url" | "openai_base_url_no_forced";
-  resolvedMode?: "provider_auth" | "provider_env" | "openai_base_url" | "openai_base_url_no_forced";
+  mode: "provider_auth" | "provider_env";
+  resolvedMode?: "provider_auth" | "provider_env";
   bunAvailable?: boolean;
   configPath: string;
   backupPath: string;
@@ -98,7 +99,8 @@ export const fetchGatewaySettings = (baseUrl: string) =>
 export const updateGatewaySettings = (
   baseUrl: string,
   payload: {
-    pollIntervalSeconds: number;
+    pollIntervalSeconds?: number;
+    pollingEnabled?: boolean;
     tempMailBaseUrl?: string;
     tempMailAdminPassword?: string;
     tempMailSitePassword?: string;
@@ -127,7 +129,7 @@ export const fetchCodexAutoConfigStatus = (baseUrl: string) =>
 export const updateCodexAutoConfigStatus = (
   baseUrl: string,
   enabled: boolean,
-  mode?: "provider_auth" | "provider_env" | "openai_base_url" | "openai_base_url_no_forced",
+  mode?: "provider_auth" | "provider_env",
 ) =>
   requestJson<CodexAutoConfigStatusPayload>(baseUrl, "/admin/codex-auto-config", {
     method: "PUT",
