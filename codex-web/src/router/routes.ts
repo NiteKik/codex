@@ -9,13 +9,13 @@ type AppRouteDefinition = {
 };
 
 const featureRoutes: AppRouteDefinition[] = [
-  {
-    path: "/",
-    name: "plus",
-    title: "Plus 自助页",
-    navLabel: "Plus 自助页",
-    component: () => import("../pages/plus-page.vue"),
-  },
+  // {
+  //   path: "/",
+  //   name: "plus",
+  //   title: "Plus 自助页",
+  //   navLabel: "Plus 自助页",
+  //   component: () => import("../pages/plus-page.vue"),
+  // },
   {
     path: "/accounts",
     name: "accounts",

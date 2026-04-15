@@ -1,97 +1,60 @@
 # Codex Workspace
 
-This repository uses Bun as the package manager.
-For `codex-gateway`, runtime execution is Node.js (to avoid Windows/Bun + Playwright issues).
+本仓库使用 Bun 管理依赖，推荐直接使用开发模式运行。
 
-## Subprojects
+## 项目结构
 
-- `codex-web`: Vite+ frontend
-- `codex-gateway`: Fastify gateway service
+- `codex-web`: 前端（Vite+ / Vue）
+- `codex-gateway`: 网关服务（Fastify）
 
-## Setup
+## 一键开发启动（推荐）
 
 ```bash
-bun install
+bun install && bun run dev
 ```
 
-## Root commands
+说明：
+
+- `bun run dev` 会并行启动 `codex-web` 与 `codex-gateway`
+
+## 分开启动（可选）
+
+```bash
+bun run dev:gateway
+bun run dev:web
+```
+
+或：
+
+```bash
+bun run --cwd ./codex-gateway dev
+bun run --cwd ./codex-web dev
+```
+
+## 默认端口
+
+- Web: `http://127.0.0.1:5173`
+- Gateway API: `http://127.0.0.1:4000`
+- Gateway 内部管理端口: `127.0.0.1:4010`
+
+## VSCode Codex 接入本地 Gateway（自动）
+
+1. 启动开发环境：
 
 ```bash
 bun run dev
-bun run dev:web
-bun run dev:gateway
-bun run build
-bun run typecheck
 ```
 
-## Per-subproject commands
-
-```bash
-bun run --cwd ./codex-web dev
-bun run --cwd ./codex-gateway dev
-```
-
-Gateway note:
-
-- `bun run dev:gateway` / `bun run --cwd ./codex-gateway dev` now build with Bun and run with Node.
-
-## Gateway quick check
-
-```bash
-curl http://127.0.0.1:4000/admin/access-token
-curl http://127.0.0.1:4000/admin/virtual-quota
-```
-
-## VSCode Codex 配置教程（接入本地 Gateway）
-
-1. 启动服务
-
-```bash
-bun run dev:gateway
-bun run dev:web
-```
-
-2. 在 Web 设置页获取 token
-
-- 打开 `http://127.0.0.1:5173/settings`
-- 在“访问 Token”卡片中点击“复制 Token”
-
-3. 编辑 Codex 配置文件
+2. 网关会自动查找并接管 Codex 配置文件：
 
 - Windows: `%USERPROFILE%\\.codex\\config.toml`
 - macOS/Linux: `~/.codex/config.toml`
+- 自动写入受管 provider，并切换 `model_provider`
 
-加入以下配置：
+3. 可通过接口查看自动配置状态：
 
-```toml
-model_provider = "quota_gateway"
-
-[model_providers.quota_gateway]
-name = "Local Quota Gateway"
-base_url = "http://127.0.0.1:4000"
-env_key = "QUOTA_GATEWAY_TOKEN"
-# Optional when protocol mismatch:
-# wire_api = "responses"
+```bash
+curl http://127.0.0.1:4000/admin/codex-auto-config
 ```
 
-4. 二选一配置 token
-
-方式 A（简单）: 环境变量
-
-```powershell
-$env:QUOTA_GATEWAY_TOKEN = "从设置页复制的token"
-```
-
-方式 B（推荐）: 自动取 token（无需手动维护环境变量）
-
-```toml
-[model_providers.quota_gateway.auth]
-command = "bun"
-args = ["run", "--cwd", "D:/桌面/codex/codex-gateway", "print-token"]
-```
-
-5. 重启 VSCode/Codex 扩展后验证
-
-- 直接发起一次普通对话请求
-- 如果返回 401，优先检查 `QUOTA_GATEWAY_TOKEN` 是否生效
-- 如果返回协议不匹配，再尝试启用 `wire_api = "responses"`
+4. 网关退出时会自动还原配置（基于 `config.toml.back`）。

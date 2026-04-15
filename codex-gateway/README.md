@@ -87,43 +87,25 @@ VSCode / Codex plugin integration tip:
 - If the plugin can configure base URL only, point base URL to `http://127.0.0.1:4000`.
 - OpenAI-compatible requests can go directly to `/v1/...`.
 - ChatGPT web-like requests can go directly to `/backend-api/...`.
-- For token auth, call `GET /admin/access-token` for the default token, or use `POST /admin/tokens` to create additional managed tokens.
-- Fill token into plugin-side auth (`Authorization: Bearer <token>`).
+- For token auth, gateway can still serve token details at `GET /admin/access-token` and manage extra tokens via `POST /admin/tokens`.
 
-## Codex token wiring (step 2)
+## Codex auto-config
 
-1) Get token
+No manual token copy is required in the default flow.
 
-```powershell
-$token = (Invoke-RestMethod http://127.0.0.1:4000/admin/access-token).token
-$env:QUOTA_GATEWAY_TOKEN = $token
-```
+- On startup, gateway auto-detects Codex config path:
+  - Windows: `%USERPROFILE%\\.codex\\config.toml`
+  - macOS/Linux: `~/.codex/config.toml`
+- Gateway injects a managed provider block and switches `model_provider` automatically.
+- When Bun is available, it writes provider `auth.command` to fetch token automatically via:
+  - `bun run --cwd <gateway-dir> print-token`
+- If Bun is unavailable, it falls back to `env_key = "QUOTA_GATEWAY_TOKEN"` mode.
+- On gateway shutdown, config is restored from `config.toml.back`.
 
-2) Add provider in Codex config (`~/.codex/config.toml`)
-
-```toml
-model_provider = "quota_gateway"
-
-[model_providers.quota_gateway]
-name = "Local Quota Gateway"
-base_url = "http://127.0.0.1:4000"
-env_key = "QUOTA_GATEWAY_TOKEN"
-# Optional per provider protocol:
-# wire_api = "responses"
-```
-
-Alternative: command-based token (no manual env export):
-
-```toml
-[model_providers.quota_gateway.auth]
-command = "bun"
-args = ["run", "--cwd", "D:/your-workspace/codex-gateway", "print-token"]
-```
-
-You can also read a generated snippet from:
+Check current status:
 
 ```bash
-curl http://127.0.0.1:4000/admin/access-token
+curl http://127.0.0.1:4000/admin/codex-auto-config
 ```
 
 ## Browser login capture

@@ -72,6 +72,7 @@ const parsePid = (value: string | null) => {
 };
 
 const toTomlString = (value: string) => JSON.stringify(value);
+const toTomlStringArray = (value: string[]) => JSON.stringify(value);
 
 const readTextFile = (filePath: string) =>
   existsSync(filePath) ? normalizeNewlines(readFileSync(filePath, "utf8")) : "";
@@ -232,11 +233,11 @@ export class CodexConfigAutoManager {
     if (stored && autoConfigModes.has(stored as CodexAutoConfigMode)) {
       return stored as CodexAutoConfigMode;
     }
-    return "provider_env";
+    return "provider_auth";
   }
 
   setMode(mode: CodexAutoConfigMode) {
-    const normalized = autoConfigModes.has(mode) ? mode : "provider_env";
+    const normalized = autoConfigModes.has(mode) ? mode : "provider_auth";
     this.db.setRuntimeSetting(runtimeSettingKeys.mode, normalized);
   }
 
@@ -307,12 +308,27 @@ export class CodexConfigAutoManager {
         "",
       )
       .trimEnd();
-    const managedBlock = [
+    const resolvedMode = this.resolveMode(this.getMode());
+    const gatewayWorkingDir = process.cwd().replaceAll("\\", "/");
+    const providerHeader = `[model_providers.${managedProviderId}]`;
+    const providerCommonLines = [
       managedBlockStart,
-      `[model_providers.${managedProviderId}]`,
+      providerHeader,
       'name = "Local Quota Gateway"',
       `base_url = ${toTomlString(gatewayBaseUrl)}`,
-      'env_key = "QUOTA_GATEWAY_TOKEN"',
+    ];
+    const providerModeSpecificLines =
+      resolvedMode === "provider_auth"
+        ? [
+            "",
+            `[model_providers.${managedProviderId}.auth]`,
+            'command = "bun"',
+            `args = ${toTomlStringArray(["run", "--cwd", gatewayWorkingDir, "print-token"])}`,
+          ]
+        : ['env_key = "QUOTA_GATEWAY_TOKEN"'];
+    const managedBlock = [
+      ...providerCommonLines,
+      ...providerModeSpecificLines,
       managedBlockEnd,
     ].join("\n");
     const forcedModelProviderLine = `model_provider = "${managedProviderId}"`;
