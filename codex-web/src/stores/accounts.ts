@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { ref } from "vue";
 import { fetchAccounts, triggerQuotaPoll, type AccountRow } from "../services/gateway-api.ts";
 
 const getErrorMessage = (error: unknown, fallback: string) =>
@@ -10,34 +10,10 @@ export const useAccountsStore = defineStore("accounts", () => {
   const accounts = ref<AccountRow[]>([]);
   const errorMessage = ref("");
   const refreshing = ref(false);
-  const autoRefreshIntervalMs = ref(defaultAutoRefreshIntervalMs);
-  const autoRefreshCountdownSeconds = ref(
-    Math.ceil(defaultAutoRefreshIntervalMs / 1000),
-  );
-  const autoRefreshIntervalSeconds = computed(() =>
-    Math.max(1, Math.floor(autoRefreshIntervalMs.value / 1000)),
-  );
 
   let refreshTimerId: number | null = null;
-  let refreshCountdownTimerId: number | null = null;
   let refreshTask: Promise<void> | null = null;
   let refreshQueued = false;
-  let nextAutoRefreshAtMs: number | null = null;
-
-  const updateAutoRefreshCountdown = () => {
-    if (nextAutoRefreshAtMs === null) {
-      autoRefreshCountdownSeconds.value = autoRefreshIntervalSeconds.value;
-      return;
-    }
-
-    const remainingMs = Math.max(0, nextAutoRefreshAtMs - Date.now());
-    autoRefreshCountdownSeconds.value = Math.max(0, Math.ceil(remainingMs / 1000));
-  };
-
-  const markNextAutoRefresh = () => {
-    nextAutoRefreshAtMs = Date.now() + autoRefreshIntervalMs.value;
-    updateAutoRefreshCountdown();
-  };
 
   const refreshAccounts = (options?: { queueIfBusy?: boolean }) => {
     if (refreshTask) {
@@ -90,20 +66,15 @@ export const useAccountsStore = defineStore("accounts", () => {
   };
 
   const startAutoRefresh = (intervalMs = defaultAutoRefreshIntervalMs) => {
-    autoRefreshIntervalMs.value = Math.max(1_000, Math.floor(intervalMs));
+    const resolvedIntervalMs = Math.max(1_000, Math.floor(intervalMs));
     if (refreshTimerId !== null) {
       return;
     }
 
     void refreshAccounts();
-    markNextAutoRefresh();
     refreshTimerId = window.setInterval(() => {
       void refreshAccounts();
-      markNextAutoRefresh();
-    }, autoRefreshIntervalMs.value);
-    refreshCountdownTimerId = window.setInterval(() => {
-      updateAutoRefreshCountdown();
-    }, 1_000);
+    }, resolvedIntervalMs);
   };
 
   const stopAutoRefresh = () => {
@@ -113,18 +84,10 @@ export const useAccountsStore = defineStore("accounts", () => {
 
     window.clearInterval(refreshTimerId);
     refreshTimerId = null;
-    if (refreshCountdownTimerId !== null) {
-      window.clearInterval(refreshCountdownTimerId);
-      refreshCountdownTimerId = null;
-    }
-    nextAutoRefreshAtMs = null;
-    updateAutoRefreshCountdown();
   };
 
   return {
     accounts,
-    autoRefreshCountdownSeconds,
-    autoRefreshIntervalSeconds,
     errorMessage,
     pollNow,
     refreshAccounts,

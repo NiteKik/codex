@@ -5,13 +5,7 @@ import AccountPoolTable from "../components/accounts/AccountPoolTable.vue";
 import { useAccountsStore } from "../stores/accounts.ts";
 
 const accountsStore = useAccountsStore();
-const {
-  accounts,
-  autoRefreshCountdownSeconds,
-  autoRefreshIntervalSeconds,
-  errorMessage,
-  refreshing,
-} = storeToRefs(accountsStore);
+const { accounts, errorMessage, refreshing } = storeToRefs(accountsStore);
 
 const refreshAccounts = async () => {
   await accountsStore.refreshAccounts({ queueIfBusy: true });
@@ -30,10 +24,6 @@ onUnmounted(() => {
   <div class="dashboard-shell">
     <div v-if="errorMessage" class="dashboard-error" role="alert">
       {{ errorMessage }}
-    </div>
-    <div class="accounts-refresh-countdown">
-      自动刷新倒计时：{{ autoRefreshCountdownSeconds }} 秒
-      <span>（每 {{ autoRefreshIntervalSeconds }} 秒）</span>
     </div>
 
     <AccountPoolTable
@@ -59,29 +49,5 @@ onUnmounted(() => {
   background: rgba(253, 227, 224, 0.9);
   color: var(--critical);
   font-weight: 700;
-}
-
-.accounts-refresh-countdown {
-  justify-self: end;
-  margin-top: -8px;
-  padding: 6px 12px;
-  border: 1px solid rgba(20, 33, 61, 0.12);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  color: var(--ink);
-  font-size: 0.85rem;
-  font-weight: 700;
-}
-
-.accounts-refresh-countdown span {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-@media (max-width: 920px) {
-  .accounts-refresh-countdown {
-    justify-self: stretch;
-    text-align: center;
-  }
 }
 </style>
