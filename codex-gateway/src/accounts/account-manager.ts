@@ -48,6 +48,12 @@ const normalizePlanType = (value: string | null | undefined) =>
   value?.trim().toLowerCase() ?? "";
 
 const isFreePlanType = (value: string | null | undefined) => normalizePlanType(value) === "free";
+const isPaidPlanType = (value: string | null | undefined) => {
+  const normalized = normalizePlanType(value);
+  return normalized.length > 0 && normalized !== "free";
+};
+const subscriptionDowngradeProtectSettingKey = (accountId: string) =>
+  `subscription_downgrade_protect_until:${accountId}`;
 
 export class AccountManager {
   constructor(
@@ -55,6 +61,22 @@ export class AccountManager {
     private readonly cooldownMs: number,
     private readonly free401FreezeMs = 60 * 60_000,
   ) {}
+
+  protectSubscriptionPlan(accountId: string, durationMs: number) {
+    this.requireAccount(accountId);
+    const normalizedDurationMs = Number.isFinite(durationMs)
+      ? Math.max(0, Math.floor(durationMs))
+      : 0;
+    const settingKey = subscriptionDowngradeProtectSettingKey(accountId);
+    if (normalizedDurationMs <= 0) {
+      this.db.deleteRuntimeSetting(settingKey);
+      return null;
+    }
+
+    const protectUntil = addMs(new Date(), normalizedDurationMs);
+    this.db.setRuntimeSetting(settingKey, protectUntil);
+    return protectUntil;
+  }
 
   listAccounts() {
     this.recoverCoolingAccounts();
@@ -123,6 +145,15 @@ export class AccountManager {
     const current = this.requireAccount(accountId);
     const currentSubscription = normalizeSubscription(current.subscription);
     const hintSubscription = normalizeSubscription(subscriptionHint);
+    const protectPaidDowngrade =
+      isPaidPlanType(currentSubscription.planType) &&
+      isFreePlanType(hintSubscription.planType) &&
+      hintSubscription.status !== "inactive" &&
+      this.isSubscriptionDowngradeProtected(accountId);
+    if (protectPaidDowngrade) {
+      return false;
+    }
+
     const fallbackStatusFromPlan =
       hintSubscription.planType?.includes("trial") ? "trial" : hintSubscription.planType ? "active" : "unknown";
     const nextSubscription: SubscriptionContext = {
@@ -393,5 +424,21 @@ export class AccountManager {
     }
 
     return account;
+  }
+
+  private isSubscriptionDowngradeProtected(accountId: string) {
+    const settingKey = subscriptionDowngradeProtectSettingKey(accountId);
+    const rawProtectUntil = this.db.getRuntimeSetting(settingKey);
+    if (!rawProtectUntil) {
+      return false;
+    }
+
+    const protectUntilMs = new Date(rawProtectUntil).getTime();
+    if (!Number.isFinite(protectUntilMs) || protectUntilMs <= Date.now()) {
+      this.db.deleteRuntimeSetting(settingKey);
+      return false;
+    }
+
+    return true;
   }
 }

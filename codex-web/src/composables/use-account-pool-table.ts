@@ -31,8 +31,19 @@ export const useAccountPoolTable = (notifyCreated: () => void) => {
     unknown: "未知",
   };
 
-  const formatPercent = (value: number) =>
-    `${Math.round(Math.max(0, value) * 100)}%`;
+  const formatPercent = (value: number) => {
+    const normalized = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+    const percent = normalized * 100;
+    if (percent <= 0.05) {
+      return "0%";
+    }
+    if (percent >= 99.95) {
+      return "100%";
+    }
+
+    const digits = percent < 10 ? 1 : 0;
+    return `${percent.toFixed(digits).replace(/\.0$/, "")}%`;
+  };
 
   const formatNumber = (value: number) =>
     new Intl.NumberFormat("zh-CN").format(value);

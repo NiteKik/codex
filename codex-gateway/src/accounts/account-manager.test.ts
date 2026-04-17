@@ -196,3 +196,77 @@ describe("AccountManager free 401 handling", () => {
     expect(account?.cooldownUntil).not.toBeNull();
   });
 });
+
+describe("AccountManager subscription downgrade protection", () => {
+  test("paid plan is not downgraded by transient free hint during protection window", () => {
+    const { accountManager } = createFixture();
+    accountManager.upsertAccount(
+      createAccount({
+        id: "plus-protected",
+        name: "Plus Protected",
+        status: "healthy",
+        auth: {
+          mode: "bearer",
+          token: "test-token",
+        },
+        workspace: {
+          kind: "personal",
+          id: null,
+          name: null,
+          headers: null,
+        },
+        subscription: {
+          planType: "plus",
+          status: "active",
+        },
+      }),
+    );
+
+    accountManager.protectSubscriptionPlan("plus-protected", 60_000);
+    const updated = accountManager.mergeSubscriptionHint("plus-protected", {
+      planType: "free",
+      status: "active",
+    });
+    const account = accountManager.getAccount("plus-protected");
+
+    expect(updated).toBe(false);
+    expect(account?.subscription.planType).toBe("plus");
+    expect(account?.subscription.status).toBe("active");
+  });
+
+  test("paid plan can still downgrade when upstream explicitly reports inactive", () => {
+    const { accountManager } = createFixture();
+    accountManager.upsertAccount(
+      createAccount({
+        id: "plus-cancelled",
+        name: "Plus Cancelled",
+        status: "healthy",
+        auth: {
+          mode: "bearer",
+          token: "test-token",
+        },
+        workspace: {
+          kind: "personal",
+          id: null,
+          name: null,
+          headers: null,
+        },
+        subscription: {
+          planType: "plus",
+          status: "active",
+        },
+      }),
+    );
+
+    accountManager.protectSubscriptionPlan("plus-cancelled", 60_000);
+    const updated = accountManager.mergeSubscriptionHint("plus-cancelled", {
+      planType: "free",
+      status: "inactive",
+    });
+    const account = accountManager.getAccount("plus-cancelled");
+
+    expect(updated).toBe(true);
+    expect(account?.subscription.planType).toBe("free");
+    expect(account?.subscription.status).toBe("inactive");
+  });
+});

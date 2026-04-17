@@ -730,13 +730,14 @@ export const createGatewayRuntime = () => {
   };
 
   const schedulePostUpgradeQuotaRefresh = (accountId: string) => {
-    const followUpDelayMs = [15_000, 60_000];
+    const followUpDelayMs = [5_000, 15_000, 30_000, 60_000, 120_000];
     for (const delayMs of followUpDelayMs) {
       setTimeout(() => {
         void refreshQuotaForAccount(accountId, `cdk-upgrade+${Math.floor(delayMs / 1000)}s`);
       }, delayMs);
     }
   };
+  const postUpgradeSubscriptionProtectMs = 15 * 60_000;
 
   if (config.enableDemoSeeds) {
     const seeds = createDemoSeeds(config.mockUpstreamPort);
@@ -1738,6 +1739,23 @@ export const createGatewayRuntime = () => {
         accountManager.mergeSubscriptionHint(accountId, {
           planType: inferredPlanType,
           status: "active",
+        });
+        const protectUntil = accountManager.protectSubscriptionPlan(
+          accountId,
+          postUpgradeSubscriptionProtectMs,
+        );
+        db.logRuntime({
+          level: "info",
+          scope: "cdk-activation",
+          event: "activation.subscription_downgrade_protected",
+          message: "Subscription downgrade protection enabled after upgrade",
+          accountId,
+          detailsJson: JSON.stringify({
+            inferredPlanType,
+            protectUntil,
+            protectDurationMs: postUpgradeSubscriptionProtectMs,
+          }),
+          createdAt: new Date().toISOString(),
         });
       }
 
