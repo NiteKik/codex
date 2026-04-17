@@ -4,7 +4,7 @@ import { AccountManager } from "./accounts/account-manager.js";
 import { GatewayTokenManager } from "./auth/gateway-token-manager.js";
 import { config } from "./config.js";
 import { GatewayDatabase } from "./db/database.js";
-import { buildSeededSnapshot, createDemoSeeds } from "./demo/demo-data.js";
+import { createDemoSeeds } from "./demo/demo-data.js";
 import {
   CdkActivationService,
   type CdkActivationResult,
@@ -30,7 +30,6 @@ import type {
   Account,
   AccountStatus,
   AuthConfig,
-  QuotaSnapshot,
   WorkspaceContext,
   WorkspaceKind,
 } from "./types.js";
@@ -160,95 +159,6 @@ const parseWorkspacePayload = (
         ? existingWorkspace.headers
         : parseOptionalStringMap(workspaceBody.headers, "workspace.headers"),
   });
-};
-
-const isRecordWithRateLimit = (
-  value: unknown,
-): value is Record<string, unknown> & { rate_limit: Record<string, unknown> } =>
-  isRecord(value) && isRecord(value.rate_limit);
-
-const toNumber = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  return null;
-};
-
-const toIsoFromEpochSeconds = (value: unknown) => {
-  const epochSeconds = toNumber(value);
-  if (epochSeconds === null) {
-    return null;
-  }
-
-  const date = new Date(epochSeconds * 1000);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-};
-
-const parseWhamWindow = (value: unknown) => {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const usedPercent = toNumber(value.used_percent);
-  if (usedPercent === null) {
-    return null;
-  }
-
-  const normalizedUsedPercent = Math.min(100, Math.max(0, usedPercent));
-  return {
-    total: 100,
-    used: normalizedUsedPercent,
-    resetAt: toIsoFromEpochSeconds(value.reset_at) ?? new Date().toISOString(),
-  };
-};
-
-const parseCapturedWhamUsage = (payload: unknown, accountId: string): QuotaSnapshot | null => {
-  if (!isRecordWithRateLimit(payload)) {
-    return null;
-  }
-  const payloadRecord = payload as Record<string, unknown> & {
-    rate_limit: Record<string, unknown>;
-  };
-
-  const primaryWindow = parseWhamWindow(payloadRecord.rate_limit["primary_window"]);
-  const secondaryWindow = parseWhamWindow(payloadRecord.rate_limit["secondary_window"]);
-  const weeklyWindow = secondaryWindow ?? primaryWindow;
-  const window5hWindow = primaryWindow ?? secondaryWindow;
-
-  if (!weeklyWindow || !window5hWindow) {
-    return null;
-  }
-
-  const planTypeRaw =
-    typeof payloadRecord.plan_type === "string"
-      ? payloadRecord.plan_type.trim().toLowerCase()
-      : "";
-  const planType = planTypeRaw.length > 0 ? planTypeRaw : null;
-  const subscriptionHint = planType
-    ? {
-        planType,
-        status: planType.includes("trial") ? ("trial" as const) : ("active" as const),
-      }
-    : undefined;
-
-  return {
-    accountId,
-    weeklyTotal: weeklyWindow.total,
-    weeklyUsed: weeklyWindow.used,
-    weeklyResetAt: weeklyWindow.resetAt,
-    window5hTotal: window5hWindow.total,
-    window5hUsed: window5hWindow.used,
-    window5hResetAt: window5hWindow.resetAt,
-    sampleTime: new Date().toISOString(),
-    source: "manual",
-    ...(subscriptionHint ? { subscriptionHint } : {}),
-  };
 };
 
 const readOptionalPositiveInt = (
@@ -743,9 +653,6 @@ export const createGatewayRuntime = () => {
     const seeds = createDemoSeeds(config.mockUpstreamPort);
     for (const seed of seeds) {
       accountManager.upsertAccount(seed.account);
-      if (!db.getLatestQuotaSnapshot(seed.account.id)) {
-        accountManager.applyQuotaSnapshot(buildSeededSnapshot(seed));
-      }
     }
   }
 
@@ -1391,31 +1298,18 @@ export const createGatewayRuntime = () => {
       );
 
       try {
-        const capturedSnapshot = parseCapturedWhamUsage(
-          captureResult.usagePayload,
-          requestedAccountId,
-        );
-
-        if (capturedSnapshot) {
+        const account = accountManager.getAccount(requestedAccountId);
+        if (account) {
+          const snapshot = await provider.fetchQuota(account);
+          accountManager.mergeWorkspaceHint(requestedAccountId, snapshot.workspaceHint);
           accountManager.mergeSubscriptionHint(
             requestedAccountId,
-            capturedSnapshot.subscriptionHint,
+            snapshot.subscriptionHint,
           );
-          accountManager.applyQuotaSnapshot(capturedSnapshot);
-        } else {
-          const account = accountManager.getAccount(requestedAccountId);
-          if (account) {
-            const snapshot = await provider.fetchQuota(account);
-            accountManager.mergeWorkspaceHint(requestedAccountId, snapshot.workspaceHint);
-            accountManager.mergeSubscriptionHint(
-              requestedAccountId,
-              snapshot.subscriptionHint,
-            );
-            accountManager.applyQuotaSnapshot({
-              ...snapshot,
-              source: "manual",
-            });
-          }
+          accountManager.applyQuotaSnapshot({
+            ...snapshot,
+            source: "manual",
+          });
         }
       } catch (error) {
         db.logRuntime({

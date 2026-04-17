@@ -293,7 +293,13 @@ export class AccountManager {
     });
   }
 
+  // Backward-compatible alias; keep semantics strict via call-site discipline.
   applyQuotaSnapshot(snapshot: QuotaSnapshot) {
+    this.applyFetchedQuotaSnapshot(snapshot);
+  }
+
+  // Quota snapshot writes must only come from provider.fetchQuota() results.
+  applyFetchedQuotaSnapshot(snapshot: QuotaSnapshot) {
     const current = this.requireAccount(snapshot.accountId);
     const previousSnapshot = this.db.getLatestQuotaSnapshot(snapshot.accountId);
     const unreconciledBefore = this.db.getUnreconciledAdjustmentUnits(snapshot.accountId);
