@@ -491,8 +491,10 @@ const parseWhamWindow = (
     return null;
   }
 
+  // Some upstreams may emit fractional values in (0,1), while wham on ChatGPT
+  // uses integer percent where 1 means 1% (not 100%).
   const normalizedUsedPercent =
-    usedPercent >= 0 && usedPercent <= 1 ? usedPercent * 100 : usedPercent;
+    usedPercent >= 0 && usedPercent < 1 ? usedPercent * 100 : usedPercent;
   let clampedUsedPercent = Math.min(100, Math.max(0, normalizedUsedPercent));
   if (options?.avoidHardExhausted && clampedUsedPercent >= 100) {
     // Upstream may transiently return 100 while still reporting allowed=true.

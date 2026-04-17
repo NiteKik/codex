@@ -60,6 +60,30 @@ const mockWhamFetch = (payload: unknown) => {
 };
 
 describe("GenericHttpProvider wham payload parsing", () => {
+  test("treats used_percent=1 as 1% instead of 100%", async () => {
+    mockWhamFetch({
+      plan_type: "plus",
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: {
+          used_percent: 2,
+          reset_at: 1_776_145_753,
+        },
+        secondary_window: {
+          used_percent: 1,
+          reset_at: 1_776_732_553,
+        },
+      },
+    });
+
+    const provider = new GenericHttpProvider();
+    const snapshot = await provider.fetchQuota(createAccount());
+
+    expect(snapshot.window5hUsed).toBe(2);
+    expect(snapshot.weeklyUsed).toBe(1);
+  });
+
   test("keeps a small headroom when upstream still reports allowed=true", async () => {
     mockWhamFetch({
       plan_type: "plus",
