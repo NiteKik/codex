@@ -53,6 +53,10 @@ export const navigationItems: ReadonlyArray<{ to: string; label: string }> =
   }));
 
 export const routes: RouteRecordRaw[] = [
+  {
+    path: "/",
+    redirect: "/dashboard",
+  },
   ...featureRoutes.map((route) => ({
     path: route.path,
     name: route.name,
@@ -61,6 +65,6 @@ export const routes: RouteRecordRaw[] = [
   })),
   {
     path: "/:pathMatch(.*)*",
-    redirect: "/",
+    redirect: "/dashboard",
   },
 ] satisfies RouteRecordRaw[];
