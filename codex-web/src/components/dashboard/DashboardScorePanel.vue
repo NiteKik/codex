@@ -62,29 +62,6 @@ const formatContribution = (value: number) => {
   const sign = value > 0 ? "+" : value < 0 ? "-" : "0";
   return `${sign}${Math.abs(value).toFixed(3)}`;
 };
-
-const formatRemainingUnits = (value: number | undefined) =>
-  typeof value === "number" && Number.isFinite(value) ? value.toFixed(0) : "-";
-
-const formatResetInMs = (value: number | null | undefined) => {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return "未知";
-  }
-
-  const totalSeconds = Math.max(0, Math.round(value / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-
-  if (hours > 0) {
-    return `${hours} 小时 ${minutes} 分`;
-  }
-
-  if (minutes > 0) {
-    return `${minutes} 分`;
-  }
-
-  return `${Math.max(1, totalSeconds)} 秒`;
-};
 </script>
 
 <template>
@@ -96,7 +73,7 @@ const formatResetInMs = (value: number | null | undefined) => {
           <div>
             <span class="section-kicker">Scheduler</span>
             <h2>调度分数明细</h2>
-            <p>按账号展示最终得分、构成项和预留策略，便于快速判断为什么命中该账号。</p>
+            <p>按账号展示最终得分、贡献项与核心阈值，聚焦同屏快速横向对比。</p>
           </div>
         </div>
 
@@ -150,7 +127,7 @@ const formatResetInMs = (value: number | null | undefined) => {
                   <div class="score-card__account">
                     <strong>{{ item.identity.name }}</strong>
                     <small>
-                      账号 <code>{{ item.identity.id }}</code> · {{ item.identity.workspaceKindLabel }}
+                      {{ item.identity.workspaceKindLabel }}
                       <template v-if="item.identity.workspaceName">
                         · {{ item.identity.workspaceName }}
                       </template>
@@ -169,7 +146,7 @@ const formatResetInMs = (value: number | null | undefined) => {
                 </div>
 
                 <div class="score-card__formula">
-                  <span>周 {{ formatContribution(item.contributions.weekly) }}</span>
+                  <span>周额 {{ formatContribution(item.contributions.weekly) }}</span>
                   <span>窗口 {{ formatContribution(item.contributions.window) }}</span>
                   <span>健康 {{ formatContribution(item.contributions.health) }}</span>
                   <span>错误 {{ formatContribution(item.contributions.error) }}</span>
@@ -193,22 +170,6 @@ const formatResetInMs = (value: number | null | undefined) => {
                   <div>
                     <dt>预留策略</dt>
                     <dd>{{ item.preemptiveEligible === false ? "门槛放宽" : "满足门槛" }}</dd>
-                  </div>
-                  <div>
-                    <dt>请求后周剩余</dt>
-                    <dd>{{ formatRemainingUnits(item.weeklyRemainingAfterRequest) }}</dd>
-                  </div>
-                  <div>
-                    <dt>请求后 5h 剩余</dt>
-                    <dd>{{ formatRemainingUnits(item.windowRemainingAfterRequest) }}</dd>
-                  </div>
-                  <div>
-                    <dt>周重置倒计时</dt>
-                    <dd>{{ formatResetInMs(item.weeklyResetInMs) }}</dd>
-                  </div>
-                  <div>
-                    <dt>5h 重置倒计时</dt>
-                    <dd>{{ formatResetInMs(item.windowResetInMs) }}</dd>
                   </div>
                 </dl>
               </article>
@@ -321,14 +282,14 @@ const formatResetInMs = (value: number | null | undefined) => {
 
 .score-chip-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .score-card {
   display: grid;
   gap: 12px;
-  padding: 18px;
+  padding: 16px;
   border: 1px solid rgba(20, 33, 61, 0.08);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.82);
@@ -400,25 +361,32 @@ const formatResetInMs = (value: number | null | undefined) => {
 
 .score-card__grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   margin: 0;
 }
 
 .score-card__grid div {
-  padding: 10px 12px;
-  border-radius: 16px;
+  padding: 8px 10px;
+  border-radius: 14px;
   background: rgba(20, 33, 61, 0.05);
+  min-width: 0;
 }
 
 .score-card__grid dt {
   color: var(--muted);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
 }
 
 .score-card__grid dd {
-  margin: 6px 0 0;
-  font-size: 0.96rem;
+  margin: 4px 0 0;
+  font-size: 0.88rem;
+}
+
+@media (max-width: 1320px) {
+  .score-chip-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1080px) {
@@ -427,7 +395,7 @@ const formatResetInMs = (value: number | null | undefined) => {
   }
 
   .score-chip-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -436,6 +404,16 @@ const formatResetInMs = (value: number | null | undefined) => {
   .score-detail__summary {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .score-card__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .score-chip-grid {
+    grid-template-columns: 1fr;
   }
 
   .score-card__grid {
