@@ -9,7 +9,6 @@ import { nowIso } from "../utils/time.js";
 export class QuotaPoller extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
-  private nextAccountIndex = 0;
   private runningTask: Promise<PromiseSettledResult<QuotaSnapshot>[]> | null = null;
   private queuedSource: "poller" | "manual" | null = null;
 
@@ -115,7 +114,7 @@ export class QuotaPoller extends EventEmitter {
           source,
           accountCount: 0,
           skippedInvalidCount: 0,
-          mode: "queue-single-account",
+          mode: "all-accounts",
         }),
         createdAt: nowIso(),
       });
@@ -130,21 +129,15 @@ export class QuotaPoller extends EventEmitter {
           successCount: 0,
           failedCount: 0,
           skippedInvalidCount: 0,
-          polledAccountId: null,
-          mode: "queue-single-account",
+          polledAccountIds: [],
+          failedAccountIds: [],
+          mode: "all-accounts",
         }),
         createdAt: nowIso(),
       });
       this.emit("completed", emptyResults);
       return emptyResults;
     }
-
-    if (this.nextAccountIndex >= allAccounts.length) {
-      this.nextAccountIndex = 0;
-    }
-    const selectedIndex = this.nextAccountIndex;
-    const account = allAccounts[selectedIndex];
-    this.nextAccountIndex = (selectedIndex + 1) % allAccounts.length;
 
     this.db.logRuntime({
       level: "info",
@@ -155,14 +148,29 @@ export class QuotaPoller extends EventEmitter {
         source,
         accountCount: allAccounts.length,
         skippedInvalidCount: 0,
-        selectedAccountId: account.id,
-        selectedIndex,
-        nextIndex: this.nextAccountIndex,
-        mode: "queue-single-account",
+        polledAccountIds: allAccounts.map((account) => account.id),
+        mode: "all-accounts",
       }),
       createdAt: nowIso(),
     });
-    const results = await Promise.allSettled([this.pollAccount(account, source)]);
+    const results: PromiseSettledResult<QuotaSnapshot>[] = [];
+    const failedAccountIds: string[] = [];
+    for (const account of allAccounts) {
+      try {
+        const snapshot = await this.pollAccount(account, source);
+        results.push({
+          status: "fulfilled",
+          value: snapshot,
+        });
+      } catch (error) {
+        results.push({
+          status: "rejected",
+          reason: error,
+        });
+        failedAccountIds.push(account.id);
+      }
+    }
+
     const successCount = results.filter((result) => result.status === "fulfilled").length;
     const failedCount = results.length - successCount;
     this.db.logRuntime({
@@ -175,8 +183,9 @@ export class QuotaPoller extends EventEmitter {
         successCount,
         failedCount,
         skippedInvalidCount: 0,
-        polledAccountId: account.id,
-        mode: "queue-single-account",
+        polledAccountIds: allAccounts.map((account) => account.id),
+        failedAccountIds,
+        mode: "all-accounts",
       }),
       createdAt: nowIso(),
     });

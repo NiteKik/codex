@@ -51,7 +51,7 @@ const {
           <SwitchThumb class="settings-switch-thumb" />
         </SwitchRoot>
       </div>
-      <p class="settings-helper">额度采集频率已固定为每 45 秒一次（队列逐个账号刷新）。</p>
+      <p class="settings-helper">额度采集频率已固定为每 45 秒一次（每个账号依次刷新）。</p>
       <p v-if="controlError" class="settings-feedback settings-feedback--error">
         {{ controlError }}
       </p>
