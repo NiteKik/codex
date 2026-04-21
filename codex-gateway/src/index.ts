@@ -23,13 +23,15 @@ const shutdown = async (reason: string) => {
 const boot = async () => {
   try {
     await runtime.mockUpstream.listen();
-    await runtime.poller.runOnce("manual");
     runtime.poller.start();
     runtime.autoRegisterReplenisher.start();
     void runtime.autoRegisterReplenisher.runOnce("startup");
     await runtime.app.listen({
       port: config.gatewayPort,
       host: "127.0.0.1",
+    });
+    void runtime.poller.runOnce("manual").catch((error) => {
+      console.error("Startup quota polling failed:", error);
     });
 
     console.log(`Mock upstream listening on http://127.0.0.1:${config.mockUpstreamPort}`);
